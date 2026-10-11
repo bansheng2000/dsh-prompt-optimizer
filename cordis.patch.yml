@@ -1,0 +1,20 @@
+# dsh-prompt-optimizer — 输入框右侧「白话 → 提示词」按钮
+#
+# 注册一个宿主条目 `prompt-optimizer`，装上即生效：
+# 聊天输入框右侧多一个 28x28 圆角按钮，点它把草稿里的口语化需求改写成结构化提示词。
+#
+# 必须用 `- insert:` 包裹顶层 `- id:`：bundle patch 里扁平 `- id:` 只会被 loader
+# 当成「改已有条目配置」，条目不存在时是空操作（plugin_manager list_bundles 把 id
+# 落进 overrides 而不是 rows），插件永远挂不上。
+#
+# config 里只有两个可选键，缺省即可用：
+#   rules:
+#     maxInputChars: 8000   # 超过这个长度的草稿直接拒绝请求
+#     timeoutMs: 60000      # 单次 LLM 改写超时
+- insert:
+    - id: prompt-optimizer
+      name: dsh-prompt-optimizer
+      config:
+        rules:
+          maxInputChars: 8000
+          timeoutMs: 60000
