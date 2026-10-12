@@ -120,8 +120,17 @@ assert.equal(errKid.kids[0], "改写失败：模型超时");
 assert.ok(treeWithErr.kids.indexOf(errKid) < treeWithErr.kids.findIndex((k) => k && k.type === "button"),
   "提示应当显示在图标左边");
 uiState.err = "";
-// 空闲时按钮里是图标 svg，不是文案。
-assert.ok(JSON.stringify(button.kids).includes('"path"'), "按钮应当渲染图标");
+// 空闲时按钮里是 dsh-image-gen 生成的内联图标（PNG data URI），不是文案。
+const img = button.kids.find((k) => k && k.type === "img");
+assert.ok(img, "按钮应当渲染图标");
+assert.ok(img.props.src.startsWith("data:image/png;base64,iVBORw0KGgo"), "图标应是内联 PNG data URI");
+assert.equal(img.props.src.length > 2000, true, "图标数据应真实存在，不是占位串");
+// 数据 URI 必须真的解得出 PNG（图标是内联字节，不是字符串常量）。
+const png = Buffer.from(img.props.src.slice("data:image/png;base64,".length), "base64");
+assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "内联数据必须是真 PNG 头");
+const w = png.readUInt32BE(16), hgt = png.readUInt32BE(20);
+assert.equal(w, 32, "图标按 32px 内联，交给 CSS 缩到 16px 渲染");
+assert.equal(hgt, 32);
 await button.props.onClick();
 assert.ok(lastFetch, "点击必须发请求");
 assert.equal(JSON.parse(lastFetch.init.body).text, "帮我写个爬虫", "点击必须把草稿发给宿主路由");
