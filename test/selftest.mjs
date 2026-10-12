@@ -76,9 +76,10 @@ const fakeReact = {
   useCallback: (fn) => fn,
 };
 let registration;
+let injectedStyle = null;
 const fakeDocument = {
   baseURI: "http://127.0.0.1:19387/",
-  createElement: () => ({ setAttribute() {}, remove() {} }),
+  createElement: () => (injectedStyle = { setAttribute() {}, remove() {}, textContent: "" }),
   head: { appendChild() {} },
 };
 vm.runInNewContext(clientSrc, {
@@ -184,5 +185,26 @@ assert.equal(badText.payload.error.code, "bad-text");
 assert.equal(route.path.indexOf("/prompt-optimizer/api"), 0, "宿主 match() 用 pathname 精确查表，路径必须以 / 开头");
 const wrongMethod = await call("GET", "/prompt-optimizer/api", "");
 assert.equal(wrongMethod.status, 405);
+
+// --- CSS 必须真的能命中 ---
+// 曾经的 bug：所有规则写成 [data-plugin-css="po"] .po-icon，而 data-plugin-css 是打在
+// <style> 标签自己身上的标记，根本不在按钮的祖先链里 → 规则全部失效，按钮露出浏览器
+// 默认样式（2px outset 边框 + 6px padding），看起来就是"图标外面一直有个框"。
+const styleCss = injectedStyle.textContent;
+// 先剥注释再判定：注释里正解释着这件事，直接扫原文只会命中注释（本项目踩过两次）。
+const bare = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
+assert.ok(!/data-plugin-css/.test(bare), "CSS 不得用 data-plugin-css 做作用域（它在 <style> 自身上，不是祖先）");
+const selectors = [...bare.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim());
+assert.ok(selectors.length >= 6, `应有若干条规则，实际 ${selectors.length}`);
+for (const sel of selectors) {
+  assert.ok(sel.startsWith(".po-wrap"), `每条规则都要以真实祖先 .po-wrap 开头，否则静默失效：${sel}`);
+}
+// 渲染树里必须真有 .po-wrap 这个祖先，否则上面的作用域无从命中。
+assert.equal(tree.props.className, "po-wrap", "组件根必须是 .po-wrap，CSS 以它为作用域根");
+// token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
+const KNOWN_TOKENS = new Set(["--dsw-alias-label-primary", "--dsw-alias-state-error-primary", "--dsw-radius-sm"]);
+for (const m of bare.matchAll(/var\((--[a-z0-9-]+)/g)) {
+  assert.ok(KNOWN_TOKENS.has(m[1]), `未知宿主 token，拼错会静默不生效：${m[1]}`);
+}
 
 console.log("ok - lib/optimize.js self-test passed");
