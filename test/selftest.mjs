@@ -138,6 +138,10 @@ const iconCss = /\.po-icon \{([^}]*)\}/.exec(await readFile(new URL("../lib/clie
 const btnCss = /\.po-btn \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
 assert.ok(/border:\s*none/.test(btnCss) && /background:\s*none/.test(btnCss),
   "按钮不得自带边框或底色，否则图标外会出现一圈框");
+// 宿主 button 自带 padding/appearance，只写 border:none 不够——all:unset 一次性清零。
+// 先剥掉注释，否则注释里的 all:unset 会让断言空过（变异验证发现的假绿）。
+const btnDecl = btnCss.replace(/\/\*[\s\S]*?\*\//g, "");
+assert.ok(/(^|;)\s*all:\s*unset\s*;/.test(btnDecl), "按钮需 all:unset，避免宿主 button 样式再加回 padding/边框");
 assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
   "CSS 应只锁图标高度、宽度自适应，否则会被压变形");
 await button.props.onClick();
