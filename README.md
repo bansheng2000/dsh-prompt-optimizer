@@ -1,26 +1,22 @@
 # dsh-prompt-optimizer
 
-在 DSH 聊天输入框右侧加一个按钮，把输入框里的口语化需求（"白话"）一键改写成结构化提示词。prompt-optimizer 风格：点一下，草稿被改写后的提示词整段替换。
+在 DSH 聊天输入框右侧加一个按钮，把口语化需求一键改写成结构化提示词。点一下，**面板在图标上方弹出来**：生成的提示词直接可见、可改、可重新生成，确认满意再写回输入框。
 
 ## 效果
 
-聊天输入框右侧多一个图标按钮（`conversation.input.right` slot，order 50）。图标是名侦探柯南主题横幅（源图 2500×1677，3:2），按比例缩到 40px 高 → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。CSS 只锁高度、宽度自适应，所以换源图也不会被压变形。
+输入框右侧多一个图标按钮（`conversation.input.right` slot，order 50）。图标是名侦探柯南主题横幅（源图 2500×1677，3:2），缩到 40px 高 → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。CSS 只锁高度、宽度自适应，换源图也不会被压变形。
 
-- 点它 → 读取当前草稿 → POST 宿主路由 → 用当前会话选中的 provider/model 改写 → 结果写回输入框。
-- 空草稿：按钮旁提示「输入框是空的」，不发请求。
-- 改写期间按钮变成 …，5 秒内的错误以红色小字显示在图标左边。
-- 冲突（改写期间用户又改了草稿，宿主 `insertText` 的 `draftRev` 判定失败）：提示重试。
+- 点它 → 读当前草稿 → POST 宿主路由改写 → **面板弹出**，文本框里就是改写结果。
+- 面板右上角下拉框选模型，首项「跟随会话模型」即默认（跟随会话当前 provider/model）。
+- 文本框随便改；「重新生成」按**当下草稿**再跑一遍（不是拿面板里的旧文本）。
+- 「用这条」把文本框内容写回输入框，然后收起面板。
+- 空草稿：面板照弹（让人看见为什么没结果），不发请求，红字说明原因。
+- 拿不到输入框接口（`inputActions` 缺失）：提示手动复制，面板**不关**——关了就什么都看不到。
+- 拉不到模型目录不影响改写，下拉框退回只有「跟随会话模型」。
 
 ## 安装
 
-在已安装本插件的 DSH profile 里（与 `dsh-free-search` 同目录）：
-
-```bash
-pnpm install
-```
-```
-
-或用 `_ref/install-into-profile.mjs` 把仓库目录 junction 进 profile（注意：profile 的 node_modules 是真实拷贝，改完 `lib/*.js` 必须重新安装或手工拷贝才会生效）。
+在已安装本插件的 DSH profile 里（与 `dsh-free-search` 同目录）跑 `pnpm install`。注意 profile 的 `node_modules` 是**真实拷贝不是 symlink**，改完仓库里的 `lib/*.js` 必须重新安装或手工 `Copy-Item` 到 profile 才生效。改宿主侧 `lib/index.js` 还要重启 DSH（客户端 bundle 刷新页面即可）。
 
 ## 配置
 
@@ -31,14 +27,19 @@ pnpm install
 | `maxInputChars` | 8000 | 草稿超过该长度直接 413，不调 LLM |
 | `timeoutMs` | 60000 | 单次改写超时 |
 
+模型选择**不持久化**——每次开面板跟随会话模型，选了别的只对本次生效。这是刻意的：持久化要另接 settings 桥，目前没这个需求。
+
 ## 文件
 
-- `lib/index.js` — 宿主侧：注册 `webServer` prefix 路由 `prompt-optimizer/api`，POST `{text}` → `{ok:true, value:{text}}`。
-- `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册 `conversation.input.right` slot 条目 `prompt-optimizer`。
-- `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt），不 import 宿主，可单独自测。
+- `lib/index.js` — 宿主侧：`kind: "exact"` 路由 `/prompt-optimizer/api`。`GET` → 模型目录；`POST {text, model?}` → `{ok:true, value:{text, model}}`，`model` 缺省即跟随会话。
+- `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册 `conversation.input.right` slot 条目 `prompt-optimizer`，并注入以 `.po-wrap` 为作用域根的样式。
+- `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt / `pickModel`），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。
 
-## 宿主路由
+## 宿主契约（踩过的坑）
 
-`POST /prompt-optimizer/api`（宿主侧 `kind: "exact"`）。路径必须以 `/` 开头：宿主
-`WebServer.match()` 用 pathname 查表，无前导斜杠的 key 匹配不上，按钮点了没反应。
+- 路由路径必须以 `/` 开头：宿主 `WebServer.match()` 按 pathname 查 exact 表，无前导斜杠的 key 永远匹配不上，点击静默无反应。
+- CSS 作用域必须落在**自己渲染的真实祖先**（`.po-wrap`）上。`data-plugin-css` 是打在 `<style>` 标签自己身上的去重标记，不在祖先链里，拿它做前缀会让所有规则静默失效。
+- `--dsw-*` token 名以 asar 实测为准（423 个），拼错同样静默失效。测试里有白名单挡着。
+- 面板不能靠第二个 slot 承载：宿主 `conversation.input.overlay` 锚点是 `height:0;position:absolute`，所以面板绝对定位挂在现有 `.po-wrap` 内。宿主 `.RlGAzG_card` 没有 `overflow:hidden`，不会被裁掉。
+- `inputActions.insertText` 成功时返回 `undefined`，被拒（revision 漂移）时返回 `false`——两者都可能，必须先 `typeof` 判断函数在不在，否则 props 缺失会静默走完。
