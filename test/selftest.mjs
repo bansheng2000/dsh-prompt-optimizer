@@ -50,29 +50,47 @@ const okSpan = { start: 0, end: 4, draftRev: 7 };
 assert.equal(makeInsertText(7)("新草稿", okSpan), 3);
 assert.equal(makeInsertText(8)("新草稿", okSpan), false); // rev 漂移 → 冲突
 
-// --- client 包的模块面（window.__ModuleLoader__ 按 factory 的返回值取 exports.apply）---
-// 少写 `var exports = module.exports` + `return exports` 时工厂在 ES 模块作用域里直接
-
-// --- client 包：模块面 + 真的读草稿 ---
-// 1) 模块面：window.__ModuleLoader__ 按 factory 的返回值取 exports.apply。少写
-//    `var exports = module.exports` + `return exports` 就抛 ReferenceError，整块 bundle 永不激活。
-// 2) props 必须真的传进组件：曾经的 bug 是 slots.register(..., () => OptimizeButton())，
-//    无参调用把 props 丢掉，useInput 恒 undefined，于是每次点击都报「输入框是空的」。
 const vm = await import("node:vm");
 const clientSrc = await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
-let lastFetch = undefined;
+const CATALOG = {
+  ok: true,
+  value: {
+    default: { provider: "deepseek-official", model: "deepseek-chat" },
+    routableProviders: ["deepseek-official"],
+    groups: [{ id: "deepseek-official", name: "DeepSeek", models: [{ id: "deepseek-chat", name: "deepseek-chat" }, { id: "deepseek-reasoner", name: "deepseek-reasoner" }] }],
+  },
+};
+const calls = [];
+let catalogBroken = false; // 让 GET 目录失败，验证下拉框挂了也不影响改写
 const fakeFetch = async (url, init) => {
-  lastFetch = { url: String(url), init };
+  const method = init?.method ?? "GET";
+  calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+  if (method === "GET") {
+    if (catalogBroken) throw new Error("catalog offline");
+    return { status: 200, json: async () => CATALOG };
+  }
   return { status: 200, json: async () => ({ ok: true, value: { text: "改写结果" } }) };
 };
 const h = (type, props, ...kids) => ({ type, props: props || {}, kids });
-// 组件只有两个状态：一个 boolean（busy）、一个字符串（err），按初值类型命名即可。
-const uiState = { busy: false, err: "" };
+
+// 状态槽要跨渲染留存：点击改的是 state，断言必须重渲染后才看得见新树。
+// （先前只重渲染一次就断言，面板永远读不到——假红。）
+// 假 React 的 state/ref 要跨渲染稳定：hook 调用顺序固定，所以用「每次渲染从 0 重新
+// 计数 + 全局槽位数组」来还原 React 语义。点击改的是 state，断言必须再渲染一次才看得见新树。
+const ui = { s: [], refs: [], cur: 0, refCur: 0 };
 const fakeReact = {
   createElement: h,
-  useState: (init) => [uiState[typeof init === "boolean" ? "busy" : "err"], (v) => { uiState[typeof init === "boolean" ? "busy" : "err"] = v; }],
+  useState: (init) => {
+    const i = ui.cur++;
+    if (!(i in ui.s)) ui.s[i] = init;
+    return [ui.s[i], (v) => { ui.s[i] = typeof v === "function" ? v(ui.s[i]) : v; }];
+  },
   useEffect: () => {},
-  useRef: (v) => ({ current: v }),
+  useRef: (v) => {
+    const i = ui.refCur++;
+    if (!(i in ui.refs)) ui.refs[i] = { current: v };
+    return ui.refs[i];
+  },
   useCallback: (fn) => fn,
 };
 let registration;
@@ -82,14 +100,15 @@ const fakeDocument = {
   createElement: () => (injectedStyle = { setAttribute() {}, remove() {}, textContent: "" }),
   head: { appendChild() {} },
 };
+const sandbox = { fetch: fakeFetch }; // 可换 fetch，用来模拟慢请求
 vm.runInNewContext(clientSrc, {
   window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
   document: fakeDocument,
   URL,
   console,
-  clearTimeout,
-  setTimeout,
-  fetch: fakeFetch,
+  clearTimeout: () => {},
+  setTimeout: () => 0,
+  get fetch() { return sandbox.fetch; },
 });
 assert.equal(registration.id, "dsh-prompt-optimizer");
 const face = registration.factory((spec) => {
@@ -105,84 +124,242 @@ face.apply({
 });
 assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
 assert.equal(registered.options.id, "prompt-optimizer");
-// 走一次真实点击：草稿非空 → 必须发请求；空草稿 → 不发。
-const tree = registered.Comp({
+
+const INPUT = {
   useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }),
-  inputActions: { captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }) },
-});
-const button = tree.kids.find((k) => k && k.type === "button");
-assert.ok(button, "应当渲染出按钮");
-// 提示文字排在按钮左边（DOM 顺序：文案在前，按钮在后）。
-uiState.err = "改写失败：模型超时";
-const treeWithErr = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) });
-const errKid = treeWithErr.kids.find((k) => k && k.props && k.props.className === "po-err");
-assert.ok(errKid, "有错误时应当渲染提示");
-assert.equal(errKid.kids[0], "改写失败：模型超时");
-assert.ok(treeWithErr.kids.indexOf(errKid) < treeWithErr.kids.findIndex((k) => k && k.type === "button"),
-  "提示应当显示在图标左边");
-uiState.err = "";
-// 空闲时按钮里是 dsh-image-gen 生成的内联图标（PNG data URI），不是文案。
-const img = button.kids.find((k) => k && k.type === "img");
-assert.ok(img, "按钮应当渲染图标");
-assert.ok(img.props.src.startsWith("data:image/png;base64,iVBORw0KGgo"), "图标应是内联 PNG data URI");
-assert.equal(img.props.src.length > 2000, true, "图标数据应真实存在，不是占位串");
-// 数据 URI 必须真的解得出 PNG（图标是内联字节，不是字符串常量）。
-const png = Buffer.from(img.props.src.slice("data:image/png;base64,".length), "base64");
-assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "内联数据必须是真 PNG 头");
-const w = png.readUInt32BE(16), hgt = png.readUInt32BE(20);
-assert.equal(hgt, 40, "图标按 40px 高内联，交给 CSS 缩到 20px 渲染");
-// 横幅必须保持源图 2500x1677 的 3:2 比例（用户要求「按比例缩小」）。
-assert.ok(Math.abs(w / hgt - 2500 / 1677) < 0.01, `图标应保持 3:2，实际 ${w}x${hgt}`);
-// CSS 只锁高度：宽度必须交给图片自身按比例算。
-const iconCss = /\.po-icon \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
-// 按钮自身不能画框：图标周围那圈边框来自 .po-btn 的 border/background（用户反馈"还是有边框"）。
-const btnCss = /\.po-btn \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
+  inputActions: { captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }), insertText: () => {} },
+};
+// render = 再渲染一次（state/ref 保留）；fresh = 开一个新场景（state 全清、请求记录全清）。
+const render = (props = INPUT) => {
+  ui.cur = 0;
+  ui.refCur = 0;
+  return registered.Comp(props);
+};
+const fresh = (props = INPUT) => {
+  ui.s.length = 0;
+  ui.refs.length = 0;
+  calls.length = 0;
+  return render(props);
+};
+// 目录是 fire-and-forget：loadCatalog().then(setCat) 不在 await 链上，
+// 断言下拉框之前得先把微任务排干，否则还在加载中。
+const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const panel = (tree) => tree.kids.find((k) => k && k.props && k.props.className === "po-panel");
+const btn = (tree) => tree.kids.find((k) => k && k.type === "button").props;
+const panelRows = (tree) => panel(tree).kids.filter((k) => k && k.props && k.props.className === "po-row");
+const actBtn = (tree, label) =>
+  panelRows(tree).flatMap((r) => r.kids)
+    .find((k) => k && k.type === "button" && k.kids[0] === label);
+const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
+  .find((k) => k && k.props && k.props.className === "po-msg");
+
+// --- 空闲态：只有按钮，没有面板 ---
+{
+  const tree = fresh({ useInput: INPUT.useInput });
+  assert.equal(tree.props.className, "po-wrap", "组件根必须是 .po-wrap，CSS 以它为作用域根");
+  assert.equal(panel(tree), undefined, "没点就不该有面板");
+  const iconNode = tree.kids.find((k) => k && k.type === "button").kids.find((k) => k && k.type === "img");
+  assert.ok(iconNode, "按钮应当渲染图标");
+  assert.ok(iconNode.props.src.startsWith("data:image/png;base64,iVBORw0KGgo"), "图标应是内联 PNG data URI");
+  assert.ok(iconNode.props.src.length > 2000, "图标数据应真实存在，不是占位串");
+  const png = Buffer.from(iconNode.props.src.slice("data:image/png;base64,".length), "base64");
+  assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "内联数据必须是真 PNG 头");
+  const w = png.readUInt32BE(16), hgt = png.readUInt32BE(20);
+  assert.equal(hgt, 40, "图标按 40px 高内联，交给 CSS 缩到 20px 渲染");
+  assert.ok(Math.abs(w / hgt - 2500 / 1677) < 0.01, "图标应保持 3:2");
+}
+
+// --- 点一下：面板出现 + 真发请求 ---
+{
+  let t = fresh(INPUT);
+  assert.equal(btn(t)["aria-expanded"], false);
+  await btn(t).onClick();
+  await flush();
+  t = render(INPUT); // 重渲染：state 已变，面板这时才在树上
+  assert.ok(panel(t), "点了就该有面板");
+  const post = calls.filter((c) => c.method === "POST");
+  assert.equal(post.length, 1, "点一次发一次 POST");
+  assert.equal(post[0].body.text, "帮我写个爬虫", "请求体必须带当前草稿");
+  assert.equal("model" in post[0].body, false, "默认跟随会话模型，请求体不该带 model");
+  assert.ok(calls.some((c) => c.method === "GET"), "还要拉一次模型目录");
+  const ta = panel(t).kids.find((k) => k && k.type === "textarea");
+  assert.ok(ta, "面板里得有可编辑文本框（用户要的「聊天框」）");
+  assert.equal(ta.props.value, "改写结果", "文本框里应当就是生成的提示词，可直接读可改");
+  // 改文本框 → 状态更新
+  ta.props.onChange({ target: { value: "我自己改的" } });
+  assert.equal(ui.s[2], "我自己改的", "文本框改动要进 state");
+}
+
+// --- 「用这条」写回草稿 ---
+{
+  let inserted = null;
+  const props = { useInput: INPUT.useInput, inputActions: {
+    captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }),
+    insertText: (txt) => { inserted = txt; },
+  } };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  actBtn(t, "用这条").props.onClick();
+  assert.equal(inserted, "改写结果", "「用这条」必须写回输入框");
+  t = render(props);
+  assert.equal(panel(t), undefined, "写回后自动收起面板");
+}
+
+// --- 改完草稿可重新生成：以当下草稿为准 ---
+{
+  let draft = "帮我写个爬虫";
+  const props = { useInput: (sel) => sel({ draft, draftRev: 3 }), inputActions: INPUT.inputActions };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  draft = "改过的需求";
+  await actBtn(t, "重新生成").props.onClick();
+  const posts = calls.filter((c) => c.method === "POST");
+  assert.equal(posts.length, 2, "重新生成再发一次 POST");
+  assert.equal(posts[1].body.text, "改过的需求", "重新生成必须用当下草稿，而不是上次的文本");
+}
+
+// --- 选模型：带上 {provider, model} ---
+{
+  const props = { useInput: INPUT.useInput, inputActions: INPUT.inputActions };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  await flush();
+  t = render(props);
+  const sel2 = panelRows(t).flatMap((r) => r.kids).find((k) => k && k.type === "select");
+  assert.ok(sel2, "面板里得有模型下拉框");
+  const opts = sel2.kids.filter((k) => k && k.type === "option");
+  assert.equal(opts[0].kids[0], "跟随会话模型", "第一个选项必须是「跟随会话模型」");
+  assert.ok(opts.length >= 3, "目录里每个模型都要有选项");
+  assert.ok(opts.some((o) => o.props.value === "deepseek-official/deepseek-chat"), "选项值应是 provider/model");
+  sel2.props.onChange({ target: { value: "deepseek-official/deepseek-reasoner" } });
+  t = render(props); // 重渲染后重新取按钮，闭包里才有新的 open 状态
+  await actBtn(t, "重新生成").props.onClick();
+  const last = calls.filter((c) => c.method === "POST").at(-1);
+  assert.deepEqual(last.body.model, { provider: "deepseek-official", model: "deepseek-reasoner" },
+    "选了模型必须按 {provider, model} 发给宿主");
+}
+
+// --- 再点一次：收起面板，不再发请求 ---
+{
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  t = render(INPUT);
+  calls.length = 0;
+  await btn(t).onClick();
+  await flush();
+  assert.equal(calls.length, 0, "开着的时候再点是关闭，不该发请求");
+  t = render(INPUT);
+  assert.equal(panel(t), undefined, "再点应当收起面板");
+}
+
+// --- 空草稿：开面板但不发请求，且给提示 ---
+{
+  const props = { useInput: (sel) => sel({ draft: "   ", draftRev: 1 }) };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  assert.equal(calls.filter((c) => c.method === "POST").length, 0, "空草稿不发 POST");
+  t = render(props);
+  assert.ok(panel(t), "空草稿也开面板，让人看见为什么没结果");
+  assert.match(msgOf(t).kids[0], /空的/, "空草稿要说明原因");
+}
+
+// --- props 缺 inputActions：必须给提示，不能静默 ---
+{
+  const props = { useInput: INPUT.useInput };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  actBtn(t, "用这条").props.onClick();
+  t = render(props);
+  assert.match(msgOf(t).kids[0], /手动复制/, "拿不到输入框接口要提示手动复制");
+}
+
+// --- 目录拿不到也不影响改写（下拉框退回「跟随会话模型」）---
+{
+  catalogBroken = true;
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  await flush();
+  t = render(INPUT);
+  assert.equal(panel(t).kids.find((k) => k && k.type === "textarea").props.value, "改写结果",
+    "拉不到模型目录也要照样出结果");
+  const selEl = panelRows(t).flatMap((r) => r.kids).find((k) => k && k.type === "select");
+  assert.equal(selEl.kids.filter((k) => k && k.type === "option").length, 1, "目录挂了只剩「跟随会话模型」一项");
+  catalogBroken = false;
+}
+
+// --- 请求还在飞时再点：不能重复发（busy 守卫）---
+{
+  let release;
+  const hold = new Promise((r) => { release = r; });
+  const realFetch = fetch;
+  void realFetch;
+  const slowFetch = async (url, init) => {
+    if ((init?.method ?? "GET") === "POST") {
+      calls.push({ method: "POST", url: String(url), body: JSON.parse(init.body) });
+      await hold;
+      return { status: 200, json: async () => ({ ok: true, value: { text: "慢结果" } }) };
+    }
+    return fakeFetch(url, init);
+  };
+  sandbox.fetch = slowFetch;
+  let t = fresh(INPUT);
+  const first = btn(t).onClick();
+  t = render(INPUT);
+  await actBtn(t, "重新生成").props.onClick();
+  assert.equal(calls.filter((c) => c.method === "POST").length, 1, "上一次还没回来，不该再发一次");
+  release();
+  await first;
+  sandbox.fetch = fakeFetch;
+}
+// --- CSS 断言（图标尺寸 + all:unset 保持不变）---
+const styleCss = injectedStyle.textContent;
+const iconCss = /\.po-icon \{([^}]*)\}/.exec(styleCss)[1];
+const btnCss = /\.po-btn \{([^}]*)\}/.exec(styleCss)[1];
+const btnDecl = btnCss.replace(/\/\*[\s\S]*?\*\//g, "");
 assert.ok(/border:\s*none/.test(btnCss) && /background:\s*none/.test(btnCss),
   "按钮不得自带边框或底色，否则图标外会出现一圈框");
-// 宿主 button 自带 padding/appearance，只写 border:none 不够——all:unset 一次性清零。
-// 先剥掉注释，否则注释里的 all:unset 会让断言空过（变异验证发现的假绿）。
-const btnDecl = btnCss.replace(/\/\*[\s\S]*?\*\//g, "");
 assert.ok(/(^|;)\s*all:\s*unset\s*;/.test(btnDecl), "按钮需 all:unset，避免宿主 button 样式再加回 padding/边框");
 assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
   "CSS 应只锁图标高度、宽度自适应，否则会被压变形");
-await button.props.onClick();
-assert.ok(lastFetch, "点击必须发请求");
-assert.equal(JSON.parse(lastFetch.init.body).text, "帮我写个爬虫", "点击必须把草稿发给宿主路由");
-// props 缺失（inputActions 整个没有）时必须给提示，不能静默什么都不做——
-// insertText 成功与「函数不存在」的返回值都是 undefined，光看返回值分不开。
-{
-  uiState.err = "";
-  const bare = registered.Comp({ useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }) });
-  lastFetch = undefined;
-  await bare.kids.find((k) => k && k.type === "button").props.onClick();
-  assert.ok(lastFetch, "缺 inputActions 也照样该发请求");
-  const msg = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) })
-    .kids.find((k) => k && k.props && k.props.className === "po-err");
-  assert.ok(msg && /手动复制/.test(msg.kids[0]), `缺 inputActions 时必须提示，结果:${msg && msg.kids[0]}`);
+
+// --- CSS 必须真的能命中 ---
+// 曾经的 bug：所有规则写成 [data-plugin-css="po"] .po-icon，而 data-plugin-css 是打在
+// <style> 标签自己身上的标记，根本不在按钮的祖先链里 → 规则全部失效，按钮露出浏览器
+// 默认样式（2px outset 边框 + 6px padding），看起来就是"图标外面一直有个框"。
+// 先剥注释再判定：注释里正解释着这件事，直接扫原文只会命中注释（本项目踩过两次）。
+const bareCss = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
+assert.ok(!/data-plugin-css/.test(bareCss), "CSS 不得用 data-plugin-css 做作用域（它在 <style> 自身上，不是祖先）");
+const selectors = [...bareCss.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim());
+assert.ok(selectors.length >= 10, `应有若干条规则，实际 ${selectors.length}`);
+for (const sel of selectors) {
+  assert.ok(sel.startsWith(".po-wrap"), `每条规则都要以真实祖先 .po-wrap 开头，否则静默失效：${sel}`);
 }
-// 正常路径：insertText 存在即视为写回成功，并且要有反馈让用户知道发生了什么。
-{
-  uiState.err = "";
-  let inserted = null;
-  const okTree = registered.Comp({
-    useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }),
-    inputActions: {
-      captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }),
-      insertText: (t2, sp) => { inserted = { t2, sp }; },
-    },
-  });
-  lastFetch = undefined;
-  await okTree.kids.find((k) => k && k.type === "button").props.onClick();
-  assert.equal(inserted?.t2, "改写结果", "结果必须写回草稿");
-  const okMsg = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) })
-    .kids.find((k) => k && k.props && k.props.className === "po-err");
-  assert.ok(okMsg && /已改写/.test(okMsg.kids[0]), `成功也要有反馈，结果:${okMsg && okMsg.kids[0]}`);
+// 面板必须绝对定位且不被裁：宿主 .RlGAzG_card 只有 box-sizing/圆角/阴影，没有 overflow:hidden，
+// 所以挂在按钮旁的 .po-panel 能溢出到输入框上方。
+assert.ok(/\.po-panel \{[\s\S]*?position:\s*absolute/.test(bareCss), "面板要绝对定位，否则会把输入框撑高");
+// token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
+const KNOWN_TOKENS = new Set([
+  "--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-state-error-primary",
+  "--dsw-alias-state-business-primary", "--dsw-alias-border-l1", "--dsw-alias-bg-layer-1",
+  "--dsw-alias-interactive-bg-hover", "--dsw-radius-sm", "--dsw-radius-panel",
+  "--dsw-elevation-panel", "--dsw-specific-input-major", "--dsw-font-family",
+  "--dsw-font-xs-13", "--dsw-font-xxs-12",
+]);
+for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
+  assert.ok(KNOWN_TOKENS.has(m[1]), `未知宿主 token，拼错会静默不生效：${m[1]}`);
 }
-assert.ok(lastFetch.url.endsWith("/prompt-optimizer/api"), "POST 到前缀本身，不是 /optimize");
-const emptyTree = registered.Comp({ useInput: (sel) => sel({ draft: "   ", draftRev: 1 }) });
-lastFetch = undefined;
-await emptyTree.kids.find((k) => k && k.type === "button").props.onClick();
-assert.equal(lastFetch, undefined, "空草稿不发请求");
+
+// --- 宿主路由契约 ---
 // 契约照抄 WebServer.match()：exact 表按 pathname 精确命中，前导斜杠是硬要求。
 const { apply } = await import("../lib/index.js");
 let route, dispose;
@@ -211,30 +388,83 @@ assert.equal(okRoute.payload.error.code, "no-llm");
 const badText = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: 42 }));
 assert.equal(badText.status, 400);
 assert.equal(badText.payload.error.code, "bad-text");
-// 客户端只 POST 这一个路径，宿主用 exact 表命中，所以 handler 不需要再剥子路径。
-assert.equal(route.path.indexOf("/prompt-optimizer/api"), 0, "宿主 match() 用 pathname 精确查表，路径必须以 / 开头");
-const wrongMethod = await call("GET", "/prompt-optimizer/api", "");
-assert.equal(wrongMethod.status, 405);
+const wrongMethod = await call("DELETE", "/prompt-optimizer/api", "");
+assert.equal(wrongMethod.status, 405, "只有 GET/POST 合法");
+// GET 是模型目录：llm 不可用时也要返回可解析的空目录，而不是崩掉。
+const catRoute = await call("GET", "/prompt-optimizer/api", "");
+assert.equal(catRoute.status, 200);
+assert.deepEqual(catRoute.payload.value.groups, [], "llm 不可用时目录为空数组");
+assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 null");
 
-// --- CSS 必须真的能命中 ---
-// 曾经的 bug：所有规则写成 [data-plugin-css="po"] .po-icon，而 data-plugin-css 是打在
-// <style> 标签自己身上的标记，根本不在按钮的祖先链里 → 规则全部失效，按钮露出浏览器
-// 默认样式（2px outset 边框 + 6px padding），看起来就是"图标外面一直有个框"。
-const styleCss = injectedStyle.textContent;
-// 先剥注释再判定：注释里正解释着这件事，直接扫原文只会命中注释（本项目踩过两次）。
-const bare = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
-assert.ok(!/data-plugin-css/.test(bare), "CSS 不得用 data-plugin-css 做作用域（它在 <style> 自身上，不是祖先）");
-const selectors = [...bare.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim());
-assert.ok(selectors.length >= 6, `应有若干条规则，实际 ${selectors.length}`);
-for (const sel of selectors) {
-  assert.ok(sel.startsWith(".po-wrap"), `每条规则都要以真实祖先 .po-wrap 开头，否则静默失效：${sel}`);
-}
-// 渲染树里必须真有 .po-wrap 这个祖先，否则上面的作用域无从命中。
-assert.equal(tree.props.className, "po-wrap", "组件根必须是 .po-wrap，CSS 以它为作用域根");
-// token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
-const KNOWN_TOKENS = new Set(["--dsw-alias-label-primary", "--dsw-alias-state-error-primary", "--dsw-radius-sm"]);
-for (const m of bare.matchAll(/var\((--[a-z0-9-]+)/g)) {
-  assert.ok(KNOWN_TOKENS.has(m[1]), `未知宿主 token，拼错会静默不生效：${m[1]}`);
+// --- pickModel（纯逻辑）---
+{
+  const { pickModel } = await import("../lib/optimize.js");
+  assert.equal(pickModel(undefined), null);
+  assert.equal(pickModel({}), null);
+  assert.equal(pickModel({ model: "x" }), null, "model 不是对象时当没传");
+  assert.equal(pickModel({ model: { provider: "p" } }), null, "缺 model 时当没传");
+  assert.equal(pickModel({ model: { provider: "", model: "m" } }), null, "空 provider 当没传");
+  assert.deepEqual(pickModel({ model: { provider: " p ", model: " m " } }), { provider: "p", model: "m" }, "要去空白");
 }
 
-console.log("ok - lib/optimize.js self-test passed");
+
+// --- 宿主必须真的按客户端选的模型去调，并回显实际用的那个 ---
+// 上面的 call() 假 ctx 没有 llm.stream，POST 在 503 就返回了，走不到模型解析——
+// 所以这里换一个带 stream 的 sctx 重新注册路由，专门覆盖「选模型」这条路径。
+{
+  let used = null;
+  const fakeLlm = {
+    // p-empty 没有任何模型：宿主要跳过它，否则下拉框会出现一个空分组
+    listProviders: () => [{ id: "p-only", name: "Only" }, { id: "p-empty", name: "Empty" }],
+    listModels: async (id) => (id === "p-empty" ? [] : [{ id: "m-only", name: "Only Model" }]),
+    stream: (opts) => {
+      used = { provider: opts.provider, model: opts.model, system: opts.system, maxTokens: opts.maxTokens };
+      return (async function* () { yield { type: "text-delta", text: "改写后的正文" }; })();
+    },
+  };
+  let r3;
+  apply({ inject: (deps, fn) => fn({
+    effect: (fn2) => { fn2(); },
+    llm: fakeLlm,
+    agentDefaultModel: { currentSelection: () => ({ provider: "session-model", model: "session-model" }) },
+    agents: { get: () => ({ session: { requestHeader: () => ({ config: { provider: "hdr", model: "hdr" } }) } }) },
+    sessions: { current: () => ({ id: "s1" }) },
+    webServer: { register: (r) => { r3 = r; return () => {}; } },
+  }) }, {});
+  assert.equal(r3.path, "/prompt-optimizer/api");
+  const callWith = (method, body) => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    r3.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
+  });
+  // 不带 model → 跟随会话（requestHeader）
+  const followed = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(followed.status, 200, "llm 可用且不指定 model 时应成功");
+  assert.equal(used.provider + "/" + used.model, "hdr/hdr", "默认跟随会话模型");
+  assert.equal(used.system, SYSTEM_PROMPT, "系统提示词必须原样传给模型");
+  assert.ok(used.maxTokens > 0, "maxTokens 传 0 等于不让模型说话");
+  assert.deepEqual(followed.payload.value.model, { provider: "hdr", model: "hdr" }, "响应要回显实际用的模型");
+  assert.equal(followed.payload.value.text, "改写后的正文");
+  // 带 model → 用客户端选的那个，不能被会话回落盖掉
+  const picked = await callWith("POST", JSON.stringify({ text: "hi", model: { provider: "p-only", model: "m-only" } }));
+  assert.equal(picked.status, 200);
+  assert.equal(used.provider + "/" + used.model, "p-only/m-only", "客户端选的模型必须优先于会话模型");
+  assert.deepEqual(picked.payload.value.model, { provider: "p-only", model: "m-only" });
+  // 模型只吐空白 → 502（别把空面板交给用户）
+  fakeLlm.stream = () => (async function* () { yield { type: "text-delta", text: "   " }; })();
+  const blank = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(blank.status, 502);
+  assert.equal(blank.payload.error.code, "empty-response");
+  // 目录：这回 llm 可用，要真列出模型
+  const cat = await callWith("GET", "");
+  assert.equal(cat.payload.value.groups.length, 1, "零模型的 provider 不该出现在目录里");
+  assert.equal(cat.payload.value.groups[0].id, "p-only");
+  assert.deepEqual(cat.payload.value.routableProviders, ["p-only"]);
+  assert.equal(cat.payload.value.default.provider, "session-model");
+}
+
+console.log("ok - prompt-optimizer self-test passed");
