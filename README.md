@@ -4,11 +4,11 @@
 
 ## 效果
 
-聊天输入框右侧多一个 ✦ 按钮（`conversation.input.right` slot，order 50）。
+聊天输入框右侧多一个四角星图标按钮（`conversation.input.right` slot，order 50）。图标是内联 SVG（`fill="currentColor"`），跟随主题色，不需要静态文件服务。
 
 - 点它 → 读取当前草稿 → POST 宿主路由 → 用当前会话选中的 provider/model 改写 → 结果写回输入框。
 - 空草稿：按钮旁提示「输入框是空的」，不发请求。
-- 改写期间按钮变成 …，5 秒内的错误以红色小字显示在按钮旁。
+- 改写期间按钮变成 …，5 秒内的错误以红色小字显示在图标左边。
 - 冲突（改写期间用户又改了草稿，宿主 `insertText` 的 `draftRev` 判定失败）：提示重试。
 
 ## 安装
