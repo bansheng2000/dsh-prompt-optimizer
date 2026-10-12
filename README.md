@@ -38,14 +38,7 @@ pnpm install
 - `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。
 
-## 自测
+## 宿主路由
 
-```bash
-node test/selftest.mjs   # ok - lib/optimize.js self-test passed
-```
-
-## 注意
-
-- 客户端 fetch 走 `new URL("prompt-optimizer/api", document.baseURI)`：GUI 挂在 `<base href="./">` 下，绝对路径会被反代目录前缀打偏。
-- 颜色一律用 `--dsw-alias-*` / `--dsw-selector-*`，不写死色值，浅色深色主题都能跟上。
-- 换图标：把新图按比例缩到高 40px（保持原始宽高比）→ base64 → 替换 `lib/client.js` 里的 `ICON_SRC`；CSS 高度（20px 显示）在同一处的 `.po-icon` 规则里改。自测会断言内联 PNG 的高度与比例，改尺寸时同步改断言。
+`POST /prompt-optimizer/api`（宿主侧 `kind: "exact"`）。路径必须以 `/` 开头：宿主
+`WebServer.match()` 用 pathname 查表，无前导斜杠的 key 匹配不上，按钮点了没反应。

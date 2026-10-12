@@ -134,6 +134,10 @@ assert.equal(hgt, 40, "图标按 40px 高内联，交给 CSS 缩到 20px 渲染"
 assert.ok(Math.abs(w / hgt - 2500 / 1677) < 0.01, `图标应保持 3:2，实际 ${w}x${hgt}`);
 // CSS 只锁高度：宽度必须交给图片自身按比例算。
 const iconCss = /\.po-icon \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
+// 按钮自身不能画框：图标周围那圈边框来自 .po-btn 的 border/background（用户反馈"还是有边框"）。
+const btnCss = /\.po-btn \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
+assert.ok(/border:\s*none/.test(btnCss) && /background:\s*none/.test(btnCss),
+  "按钮不得自带边框或底色，否则图标外会出现一圈框");
 assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
   "CSS 应只锁图标高度、宽度自适应，否则会被压变形");
 await button.props.onClick();
@@ -144,14 +148,14 @@ const emptyTree = registered.Comp({ useInput: (sel) => sel({ draft: "   ", draft
 lastFetch = undefined;
 await emptyTree.kids.find((k) => k && k.type === "button").props.onClick();
 assert.equal(lastFetch, undefined, "空草稿不发请求");
-// --- 宿主路由：客户端 POST 的是前缀本身（prompt-optimizer/api），不是 /optimize ---
-// 契约照抄 WebServer.register 的 prefix 表：按 pathname 前缀匹配。
+// 契约照抄 WebServer.match()：exact 表按 pathname 精确命中，前导斜杠是硬要求。
 const { apply } = await import("../lib/index.js");
 let route, dispose;
 apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
   webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, {});
-assert.equal(route.kind, "prefix");
-assert.equal(route.path, "prompt-optimizer/api");
+assert.equal(route.kind, "exact");
+assert.equal(route.path, "/prompt-optimizer/api", "路由路径必须带前导斜杠，否则宿主 match() 匹配不到");
+
 // 最小 req/res：req 是 data/end 事件源，res 收 writeHead + end。
 function call(method, url, body) {
   return new Promise((resolve) => {
@@ -172,8 +176,8 @@ assert.equal(okRoute.payload.error.code, "no-llm");
 const badText = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: 42 }));
 assert.equal(badText.status, 400);
 assert.equal(badText.payload.error.code, "bad-text");
-const wrongSub = await call("POST", "/prompt-optimizer/api/optimize", JSON.stringify({ text: "hi" }));
-assert.equal(wrongSub.status, 404, "前缀之后还有子路径才是 404");
+// 客户端只 POST 这一个路径，宿主用 exact 表命中，所以 handler 不需要再剥子路径。
+assert.equal(route.path.indexOf("/prompt-optimizer/api"), 0, "宿主 match() 用 pathname 精确查表，路径必须以 / 开头");
 const wrongMethod = await call("GET", "/prompt-optimizer/api", "");
 assert.equal(wrongMethod.status, 405);
 
