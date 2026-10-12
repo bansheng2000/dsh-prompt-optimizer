@@ -4,7 +4,7 @@
 
 ## 效果
 
-聊天输入框右侧多一个四角星图标按钮（`conversation.input.right` slot，order 50）。图标是用 `dsh-image-gen`（provider `google-sub`）生成的 PNG：去白底 → 预乘 → 缩到 32px → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。
+聊天输入框右侧多一个图标按钮（`conversation.input.right` slot，order 50）。图标是名侦探柯南主题横幅（源图 2500×1677，3:2），按比例缩到 40px 高 → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。CSS 只锁高度、宽度自适应，所以换源图也不会被压变形。
 
 - 点它 → 读取当前草稿 → POST 宿主路由 → 用当前会话选中的 provider/model 改写 → 结果写回输入框。
 - 空草稿：按钮旁提示「输入框是空的」，不发请求。
@@ -48,4 +48,4 @@ node test/selftest.mjs   # ok - lib/optimize.js self-test passed
 
 - 客户端 fetch 走 `new URL("prompt-optimizer/api", document.baseURI)`：GUI 挂在 `<base href="./">` 下，绝对路径会被反代目录前缀打偏。
 - 颜色一律用 `--dsw-alias-*` / `--dsw-selector-*`，不写死色值，浅色深色主题都能跟上。
-- 换图标：重新用 dsh-image-gen 生图 → 去白底 → 缩到 32px（细节太多在 16px 下会糊成噪点，自测里按 32px 断言）→ 替换 `lib/client.js` 里的 `ICON_SRC`。
+- 换图标：把新图按比例缩到高 40px（保持原始宽高比）→ base64 → 替换 `lib/client.js` 里的 `ICON_SRC`；CSS 高度（20px 显示）在同一处的 `.po-icon` 规则里改。自测会断言内联 PNG 的高度与比例，改尺寸时同步改断言。

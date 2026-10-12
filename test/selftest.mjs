@@ -129,8 +129,13 @@ assert.equal(img.props.src.length > 2000, true, "图标数据应真实存在，�
 const png = Buffer.from(img.props.src.slice("data:image/png;base64,".length), "base64");
 assert.deepEqual([...png.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], "内联数据必须是真 PNG 头");
 const w = png.readUInt32BE(16), hgt = png.readUInt32BE(20);
-assert.equal(w, 32, "图标按 32px 内联，交给 CSS 缩到 16px 渲染");
-assert.equal(hgt, 32);
+assert.equal(hgt, 40, "图标按 40px 高内联，交给 CSS 缩到 20px 渲染");
+// 横幅必须保持源图 2500x1677 的 3:2 比例（用户要求「按比例缩小」）。
+assert.ok(Math.abs(w / hgt - 2500 / 1677) < 0.01, `图标应保持 3:2，实际 ${w}x${hgt}`);
+// CSS 只锁高度：宽度必须交给图片自身按比例算。
+const iconCss = /\.po-icon \{([^}]*)\}/.exec(await readFile(new URL("../lib/client.js", import.meta.url), "utf8"))[1];
+assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
+  "CSS 应只锁图标高度、宽度自适应，否则会被压变形");
 await button.props.onClick();
 assert.ok(lastFetch, "点击必须发请求");
 assert.equal(JSON.parse(lastFetch.init.body).text, "帮我写个爬虫", "点击必须把草稿发给宿主路由");
