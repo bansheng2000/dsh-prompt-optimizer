@@ -52,17 +52,115 @@ assert.equal(makeInsertText(8)("新草稿", okSpan), false); // rev 漂移 → �
 
 // --- client 包的模块面（window.__ModuleLoader__ 按 factory 的返回值取 exports.apply）---
 // 少写 `var exports = module.exports` + `return exports` 时工厂在 ES 模块作用域里直接
-// ReferenceError: exports is not defined，整块 client bundle 永不激活——按钮不出现。
+
+// --- client 包：模块面 + 真的读草稿 ---
+// 1) 模块面：window.__ModuleLoader__ 按 factory 的返回值取 exports.apply。少写
+//    `var exports = module.exports` + `return exports` 就抛 ReferenceError，整块 bundle 永不激活。
+// 2) props 必须真的传进组件：曾经的 bug 是 slots.register(..., () => OptimizeButton())，
+//    无参调用把 props 丢掉，useInput 恒 undefined，于是每次点击都报「输入框是空的」。
 const vm = await import("node:vm");
 const clientSrc = await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
+let lastFetch = undefined;
+const fakeFetch = async (url, init) => {
+  lastFetch = { url: String(url), init };
+  return { status: 200, json: async () => ({ ok: true, value: { text: "改写结果" } }) };
+};
+const h = (type, props, ...kids) => ({ type, props: props || {}, kids });
+// 组件只有两个状态：一个 boolean（busy）、一个字符串（err），按初值类型命名即可。
+const uiState = { busy: false, err: "" };
+const fakeReact = {
+  createElement: h,
+  useState: (init) => [uiState[typeof init === "boolean" ? "busy" : "err"], (v) => { uiState[typeof init === "boolean" ? "busy" : "err"] = v; }],
+  useEffect: () => {},
+  useRef: (v) => ({ current: v }),
+  useCallback: (fn) => fn,
+};
 let registration;
+const fakeDocument = {
+  baseURI: "http://127.0.0.1:19387/",
+  createElement: () => ({ setAttribute() {}, remove() {} }),
+  head: { appendChild() {} },
+};
 vm.runInNewContext(clientSrc, {
   window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
+  document: fakeDocument,
+  URL,
   console,
+  clearTimeout,
+  setTimeout,
+  fetch: fakeFetch,
 });
 assert.equal(registration.id, "dsh-prompt-optimizer");
-const face = registration.factory(() => ({}));
+const face = registration.factory((spec) => {
+  assert.equal(spec, "react", "客户端只该向宿主模块表要 react");
+  return fakeReact;
+});
 assert.equal(typeof face.apply, "function");
 assert.equal(face.inject.join(","), "slots");
+let registered;
+face.apply({
+  effect: (fn) => fn(),
+  slots: { inject: (key, fn) => fn(), register: (options, Comp) => { registered = { options, Comp }; } },
+});
+assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
+assert.equal(registered.options.id, "prompt-optimizer");
+// 走一次真实点击：草稿非空 → 必须发请求；空草稿 → 不发。
+const tree = registered.Comp({
+  useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }),
+  inputActions: { captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }) },
+});
+const button = tree.kids.find((k) => k && k.type === "button");
+assert.ok(button, "应当渲染出按钮");
+// 提示文字排在按钮左边（DOM 顺序：文案在前，按钮在后）。
+uiState.err = "改写失败：模型超时";
+const treeWithErr = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) });
+const errKid = treeWithErr.kids.find((k) => k && k.props && k.props.className === "po-err");
+assert.ok(errKid, "有错误时应当渲染提示");
+assert.equal(errKid.kids[0], "改写失败：模型超时");
+assert.ok(treeWithErr.kids.indexOf(errKid) < treeWithErr.kids.findIndex((k) => k && k.type === "button"),
+  "提示应当显示在图标左边");
+uiState.err = "";
+// 空闲时按钮里是图标 svg，不是文案。
+assert.ok(JSON.stringify(button.kids).includes('"path"'), "按钮应当渲染图标");
+await button.props.onClick();
+assert.ok(lastFetch, "点击必须发请求");
+assert.equal(JSON.parse(lastFetch.init.body).text, "帮我写个爬虫", "点击必须把草稿发给宿主路由");
+assert.ok(lastFetch.url.endsWith("/prompt-optimizer/api"), "POST 到前缀本身，不是 /optimize");
+const emptyTree = registered.Comp({ useInput: (sel) => sel({ draft: "   ", draftRev: 1 }) });
+lastFetch = undefined;
+await emptyTree.kids.find((k) => k && k.type === "button").props.onClick();
+assert.equal(lastFetch, undefined, "空草稿不发请求");
+// --- 宿主路由：客户端 POST 的是前缀本身（prompt-optimizer/api），不是 /optimize ---
+// 契约照抄 WebServer.register 的 prefix 表：按 pathname 前缀匹配。
+const { apply } = await import("../lib/index.js");
+let route, dispose;
+apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
+  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, {});
+assert.equal(route.kind, "prefix");
+assert.equal(route.path, "prompt-optimizer/api");
+// 最小 req/res：req 是 data/end 事件源，res 收 writeHead + end。
+function call(method, url, body) {
+  return new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(status) { this.status = status; },
+      end(text) { this.payload = JSON.parse(text); resolve(this); } };
+    const req = { method, url, headers: { host: "127.0.0.1:19387" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    // handler 是 async；只有走到 readJson 的请求才注册 data/end 监听器，
+    // 提前 4xx/405 返回的请求没有，所以喂 body 要放下一轮并守卫。
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
+  });
+}
+const okRoute = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: "hi" }));
+assert.equal(okRoute.status, 503, "路由/解析/校验都过了，才轮到 llm 不可用");
+assert.equal(okRoute.payload.error.code, "no-llm");
+const badText = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: 42 }));
+assert.equal(badText.status, 400);
+assert.equal(badText.payload.error.code, "bad-text");
+const wrongSub = await call("POST", "/prompt-optimizer/api/optimize", JSON.stringify({ text: "hi" }));
+assert.equal(wrongSub.status, 404, "前缀之后还有子路径才是 404");
+const wrongMethod = await call("GET", "/prompt-optimizer/api", "");
+assert.equal(wrongMethod.status, 405);
 
 console.log("ok - lib/optimize.js self-test passed");
