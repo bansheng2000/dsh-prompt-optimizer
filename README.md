@@ -4,7 +4,7 @@
 
 ## 效果
 
-聊天输入框右侧多一个四角星图标按钮（`conversation.input.right` slot，order 50）。图标是内联 SVG（`fill="currentColor"`），跟随主题色，不需要静态文件服务。
+聊天输入框右侧多一个四角星图标按钮（`conversation.input.right` slot，order 50）。图标是用 `dsh-image-gen`（provider `google-sub`）生成的 PNG：去白底 → 预乘 → 缩到 32px → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。
 
 - 点它 → 读取当前草稿 → POST 宿主路由 → 用当前会话选中的 provider/model 改写 → 结果写回输入框。
 - 空草稿：按钮旁提示「输入框是空的」，不发请求。
@@ -48,3 +48,4 @@ node test/selftest.mjs   # ok - lib/optimize.js self-test passed
 
 - 客户端 fetch 走 `new URL("prompt-optimizer/api", document.baseURI)`：GUI 挂在 `<base href="./">` 下，绝对路径会被反代目录前缀打偏。
 - 颜色一律用 `--dsw-alias-*` / `--dsw-selector-*`，不写死色值，浅色深色主题都能跟上。
+- 换图标：重新用 dsh-image-gen 生图 → 去白底 → 缩到 32px（细节太多在 16px 下会糊成噪点，自测里按 32px 断言）→ 替换 `lib/client.js` 里的 `ICON_SRC`。
