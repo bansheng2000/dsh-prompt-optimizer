@@ -148,6 +148,36 @@ assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
 await button.props.onClick();
 assert.ok(lastFetch, "点击必须发请求");
 assert.equal(JSON.parse(lastFetch.init.body).text, "帮我写个爬虫", "点击必须把草稿发给宿主路由");
+// props 缺失（inputActions 整个没有）时必须给提示，不能静默什么都不做——
+// insertText 成功与「函数不存在」的返回值都是 undefined，光看返回值分不开。
+{
+  uiState.err = "";
+  const bare = registered.Comp({ useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }) });
+  lastFetch = undefined;
+  await bare.kids.find((k) => k && k.type === "button").props.onClick();
+  assert.ok(lastFetch, "缺 inputActions 也照样该发请求");
+  const msg = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) })
+    .kids.find((k) => k && k.props && k.props.className === "po-err");
+  assert.ok(msg && /手动复制/.test(msg.kids[0]), `缺 inputActions 时必须提示，结果:${msg && msg.kids[0]}`);
+}
+// 正常路径：insertText 存在即视为写回成功，并且要有反馈让用户知道发生了什么。
+{
+  uiState.err = "";
+  let inserted = null;
+  const okTree = registered.Comp({
+    useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }),
+    inputActions: {
+      captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }),
+      insertText: (t2, sp) => { inserted = { t2, sp }; },
+    },
+  });
+  lastFetch = undefined;
+  await okTree.kids.find((k) => k && k.type === "button").props.onClick();
+  assert.equal(inserted?.t2, "改写结果", "结果必须写回草稿");
+  const okMsg = registered.Comp({ useInput: (sel) => sel({ draft: "x", draftRev: 1 }) })
+    .kids.find((k) => k && k.props && k.props.className === "po-err");
+  assert.ok(okMsg && /已改写/.test(okMsg.kids[0]), `成功也要有反馈，结果:${okMsg && okMsg.kids[0]}`);
+}
 assert.ok(lastFetch.url.endsWith("/prompt-optimizer/api"), "POST 到前缀本身，不是 /optimize");
 const emptyTree = registered.Comp({ useInput: (sel) => sel({ draft: "   ", draftRev: 1 }) });
 lastFetch = undefined;
