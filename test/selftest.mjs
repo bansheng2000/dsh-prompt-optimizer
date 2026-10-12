@@ -125,15 +125,28 @@ face.apply({
 assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
 assert.equal(registered.options.id, "prompt-optimizer");
 
+// 宿主 useInput 是 materializeStandardBinding 生成的 React selector hook，只能在渲染期调。
+// 之前的 bug：把它写在 onClick 的异步回调里 → 非渲染期调 hook 抛错 → 面板弹了但是空的、
+// 目录 GET 也没发出去。这层守卫就是为那条回归留的（假 React 不查 hook 规则）。
+let inRender = false;
+const useInputOf = (state) => (sel) => {
+  if (!inRender) throw new Error("useInput 只能在渲染期调用");
+  return sel(state);
+};
 const INPUT = {
-  useInput: (sel) => sel({ draft: "帮我写个爬虫", draftRev: 3 }),
+  useInput: useInputOf({ draft: "帮我写个爬虫", draftRev: 3 }),
   inputActions: { captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }), insertText: () => {} },
 };
 // render = 再渲染一次（state/ref 保留）；fresh = 开一个新场景（state 全清、请求记录全清）。
 const render = (props = INPUT) => {
   ui.cur = 0;
   ui.refCur = 0;
-  return registered.Comp(props);
+  inRender = true;
+  try {
+    return registered.Comp(props);
+  } finally {
+    inRender = false;
+  }
 };
 const fresh = (props = INPUT) => {
   ui.s.length = 0;
@@ -210,12 +223,13 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
 // --- 改完草稿可重新生成：以当下草稿为准 ---
 {
   let draft = "帮我写个爬虫";
-  const props = { useInput: (sel) => sel({ draft, draftRev: 3 }), inputActions: INPUT.inputActions };
+  const props = { useInput: useInputOf({ get draft() { return draft; }, draftRev: 3 }), inputActions: INPUT.inputActions };
   let t = fresh(props);
   await btn(t).onClick();
   await flush();
   t = render(props);
   draft = "改过的需求";
+  t = render(props); // 宿主 store 变了会驱动重渲染，generate 的闭包随之拿到新草稿
   await actBtn(t, "重新生成").props.onClick();
   const posts = calls.filter((c) => c.method === "POST");
   assert.equal(posts.length, 2, "重新生成再发一次 POST");
@@ -260,7 +274,7 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
 
 // --- 空草稿：开面板但不发请求，且给提示 ---
 {
-  const props = { useInput: (sel) => sel({ draft: "   ", draftRev: 1 }) };
+  const props = { useInput: useInputOf({ draft: "   ", draftRev: 1 }) };
   let t = fresh(props);
   await btn(t).onClick();
   await flush();
@@ -317,8 +331,27 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
   t = render(INPUT);
   await actBtn(t, "重新生成").props.onClick();
   assert.equal(calls.filter((c) => c.method === "POST").length, 1, "上一次还没回来，不该再发一次");
+  // 生成中必须有可见状态：上一次用户报「点了没反应」就是既没文字也没进度
+  assert.match(String(msgOf(t).kids[0] ?? ""), /生成中/, "请求在飞时面板要有可见提示");
   release();
   await first;
+  sandbox.fetch = fakeFetch;
+}
+
+// --- 失败提示不能被「生成中」的清理顺手抹掉 ---
+{
+  sandbox.fetch = async (url, init) => {
+    if ((init?.method ?? "GET") === "POST") {
+      calls.push({ method: "POST", url: String(url) });
+      return { status: 503, json: async () => ({ ok: false, error: { message: "模型不可用" } }) };
+    }
+    return fakeFetch(url, init);
+  };
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  t = render(INPUT);
+  assert.match(String(msgOf(t).kids[0] ?? ""), /生成失败.*模型不可用/, "失败原因要留在面板上");
   sandbox.fetch = fakeFetch;
 }
 // --- CSS 断言（图标尺寸 + all:unset 保持不变）---
@@ -347,6 +380,15 @@ for (const sel of selectors) {
 // 面板必须绝对定位且不被裁：宿主 .RlGAzG_card 只有 box-sizing/圆角/阴影，没有 overflow:hidden，
 // 所以挂在按钮旁的 .po-panel 能溢出到输入框上方。
 assert.ok(/\.po-panel \{[\s\S]*?position:\s*absolute/.test(bareCss), "面板要绝对定位，否则会把输入框撑高");
+const panelCss = /\.po-panel \{([^}]*)\}/.exec(bareCss)[1];
+assert.ok(!/\btop:\s*\d/.test(panelCss), "面板要挂在图标上方（bottom），不是下方");
+assert.ok(/bottom:\s*calc\(100%/.test(panelCss), "面板用 bottom:calc(100% + Npx) 贴到图标上沿");
+assert.ok(/width:\s*min\(/.test(panelCss) && /100vw/.test(panelCss),
+  "宽度必须按视口兜底，否则手机窄屏会出屏");
+assert.ok(/max-height:[^;]*vh/.test(panelCss) && /overflow:\s*auto/.test(panelCss),
+  "面板要限高可滚，矮屏才看得全");
+assert.ok(/\.po-row \{[^}]*flex-wrap:\s*wrap/.test(bareCss), "面板行要能换行，否则窄屏挤不下");
+assert.ok(/\.po-text \{[^}]*max-height:\s*40vh/.test(bareCss), "文本框也要限高，不能把面板撑出屏");
 // token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
 const KNOWN_TOKENS = new Set([
   "--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-state-error-primary",
