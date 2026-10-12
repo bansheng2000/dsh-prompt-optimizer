@@ -1,5 +1,6 @@
 // 自测：不连宿主，只验纯逻辑 + insertText 的冲突分支语义（照宿主复刻的最小形状）。
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { checkRequest, normalizePromptify, SYSTEM_PROMPT, userPrompt, fail } from "../lib/optimize.js";
 
 // --- checkRequest ---
@@ -48,5 +49,20 @@ function makeInsertText(initialRev) {
 const okSpan = { start: 0, end: 4, draftRev: 7 };
 assert.equal(makeInsertText(7)("新草稿", okSpan), 3);
 assert.equal(makeInsertText(8)("新草稿", okSpan), false); // rev 漂移 → 冲突
+
+// --- client 包的模块面（window.__ModuleLoader__ 按 factory 的返回值取 exports.apply）---
+// 少写 `var exports = module.exports` + `return exports` 时工厂在 ES 模块作用域里直接
+// ReferenceError: exports is not defined，整块 client bundle 永不激活——按钮不出现。
+const vm = await import("node:vm");
+const clientSrc = await readFile(new URL("../lib/client.js", import.meta.url), "utf8");
+let registration;
+vm.runInNewContext(clientSrc, {
+  window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
+  console,
+});
+assert.equal(registration.id, "dsh-prompt-optimizer");
+const face = registration.factory(() => ({}));
+assert.equal(typeof face.apply, "function");
+assert.equal(face.inject.join(","), "slots");
 
 console.log("ok - lib/optimize.js self-test passed");
