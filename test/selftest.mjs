@@ -372,7 +372,8 @@ assert.ok(/height:\s*20px/.test(iconCss) && /width:\s*auto/.test(iconCss),
 // 先剥注释再判定：注释里正解释着这件事，直接扫原文只会命中注释（本项目踩过两次）。
 const bareCss = styleCss.replace(/\/\*[\s\S]*?\*\//g, "");
 assert.ok(!/data-plugin-css/.test(bareCss), "CSS 不得用 data-plugin-css 做作用域（它在 <style> 自身上，不是祖先）");
-const selectors = [...bareCss.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim());
+// at-rule（@media）不是选择器，它的块里装的是别处也要遵守作用域根的规则——过滤掉再校验。
+const selectors = [...bareCss.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim()).filter((s) => !s.startsWith("@"));
 assert.ok(selectors.length >= 10, `应有若干条规则，实际 ${selectors.length}`);
 for (const sel of selectors) {
   assert.ok(sel.startsWith(".po-wrap"), `每条规则都要以真实祖先 .po-wrap 开头，否则静默失效：${sel}`);
@@ -389,6 +390,18 @@ assert.ok(/max-height:[^;]*vh/.test(panelCss) && /overflow:\s*auto/.test(panelCs
   "面板要限高可滚，矮屏才看得全");
 assert.ok(/\.po-row \{[^}]*flex-wrap:\s*wrap/.test(bareCss), "面板行要能换行，否则窄屏挤不下");
 assert.ok(/\.po-text \{[^}]*max-height:\s*40vh/.test(bareCss), "文本框也要限高，不能把面板撑出屏");
+// 手机版实测（用户截图）：宿主把输入框那一行重排后，图标落到屏幕最左边，按图标对齐的面板
+// 从左边缘出屏，只剩「重新生成」看得见。所以窄屏必须有一条脱离图标、改用视口锚定的 @media 规则。
+const narrow = /@media \(max-width: 640px\) \{([\s\S]*?)\n {6}\}/.exec(bareCss);
+assert.ok(narrow, "必须有窄屏 @media 规则，手机端面板不能只按图标对齐");
+const narrowBody = narrow[1];
+assert.ok(/\.po-panel \{[\s\S]*?position:\s*fixed/.test(narrowBody), "窄屏面板要脱离图标、贴视口定位");
+assert.ok(/\.po-panel \{[\s\S]*?left:\s*8px[\s\S]*?right:\s*8px/.test(narrowBody), "窄屏面板要左右双向锚定，保证全宽可见");
+assert.ok(/\.po-panel \{[\s\S]*?top:/.test(narrowBody), "窄屏面板固定在顶部，不跟着图标上下跳");
+const narrowPanel = /\.po-panel \{([^}]*)\}/.exec(narrowBody)[1];
+assert.ok(/\bbottom:\s*auto/.test(narrowPanel),
+  "窄屏面板必须把 base 的 bottom:calc(100% + 6px) 显式盖成 auto，否则会和 top 一起把面板高度撑爆");
+assert.ok(!/\bbottom:\s*(?!auto)[^;]*\d/.test(narrowPanel), "窄屏面板的 bottom 只能是 auto");
 // token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
 const KNOWN_TOKENS = new Set([
   "--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-state-error-primary",
