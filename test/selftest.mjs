@@ -203,21 +203,57 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
   assert.equal(ui.s[2], "我自己改的", "文本框改动要进 state");
 }
 
-// --- 「用这条」写回草稿 ---
+// --- 「用这条」写回草稿：必须「替换整段」，不是追加 ---
+// 曾经用 insertText(captureInsertion() 的 span)，而 captureInsertion 给的是光标位置
+// （塌缩 span）→ 结果被追加到原文后面（用户报「现在是直接填在原内容后」）。
+// 宿主 setDraft 的语义就是「替换整段草稿」，所以主路径必须是它。
 {
-  let inserted = null;
+  let draftNow = "帮我写个爬虫";
+  const setDraft = (txt) => { draftNow = txt; };
+  const insertText = () => { throw new Error("有 setDraft 时不该走 insertText（它按 span 替换，会追加）"); };
+  const props = { useInput: useInputOf({ get draft() { return draftNow; }, draftRev: 3 }),
+    inputActions: { captureInsertion: () => ({ start: 6, end: 6, draftRev: 3 }), insertText, setDraft } };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  actBtn(t, "用这条").props.onClick();
+  assert.equal(draftNow, "改写结果", "「用这条」要把整段草稿换成改写结果");
+  assert.ok(!draftNow.includes("帮我写个爬虫"), "原草稿必须被替换掉，不能留在结果后面");
+  t = render(props);
+  assert.equal(panel(t), undefined, "写回后自动收起面板");
+}
+// 老宿主没有 setDraft：退化成 insertText 时也必须给整段 span，不能给光标 span
+{
+  let inserted = null, givenSpan = null;
   const props = { useInput: INPUT.useInput, inputActions: {
-    captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }),
-    insertText: (txt) => { inserted = txt; },
+    captureInsertion: () => ({ start: 6, end: 6, draftRev: 3 }),
+    insertText: (txt, span) => { inserted = txt; givenSpan = span; },
   } };
   let t = fresh(props);
   await btn(t).onClick();
   await flush();
   t = render(props);
   actBtn(t, "用这条").props.onClick();
-  assert.equal(inserted, "改写结果", "「用这条」必须写回输入框");
+  assert.equal(inserted, "改写结果", "无 setDraft 时仍要能写回");
+  // 逐字段比：span 是在 vm 沙箱里建的，deepEqual 跨 realm 会因原型不同而误判。
+  assert.equal(givenSpan.start, 0, "fallback 的 span 必须覆盖整段草稿，否则是追加");
+  assert.equal(givenSpan.end, 6);
+  assert.equal(givenSpan.draftRev, 3);
   t = render(props);
   assert.equal(panel(t), undefined, "写回后自动收起面板");
+}
+// insertText 被宿主拒绝（revision 漂移返回 false）：必须留在面板上提示，不许静默
+{
+  const props = { useInput: INPUT.useInput, inputActions: { insertText: () => false } };
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  actBtn(t, "用这条").props.onClick();
+  t = render(props);
+  assert.ok(panel(t), "写回被拒时不该收起面板");
+  assert.match(String(msgOf(t).kids[0] ?? ""), /手动复制/, "被拒要给出可操作的提示");
 }
 
 // --- 改完草稿可重新生成：以当下草稿为准 ---

@@ -43,3 +43,6 @@
 - `--dsw-*` token 名以 asar 实测为准（423 个），拼错同样静默失效。测试里有白名单挡着。
 - 面板不能靠第二个 slot 承载：宿主 `conversation.input.overlay` 锚点是 `height:0;position:absolute`，所以面板绝对定位挂在现有 `.po-wrap` 内。宿主 `.RlGAzG_card` 没有 `overflow:hidden`，不会被裁掉。
 - `inputActions.insertText` 成功时返回 `undefined`，被拒（revision 漂移）时返回 `false`——两者都可能，必须先 `typeof` 判断函数在不在，否则 props 缺失会静默走完。
+- **写回整段草稿只能用 `setDraft`。** `insertText(span, text)` 替换的是**你传进去的那个 span**，而 `captureInsertion()` 返回的是光标位置（塌缩 span）——用它会把改写结果追加到原文**后面**。`setDraft(text)` 的语义是「替换整段草稿」（清空 → 按换行拆段重写 → 光标落到末尾），才是「把原内容换掉」。
+- 客户端 hook 只能在渲染期调用：`props.useInput` 是宿主 `materializeStandardBinding` 生成的 React selector hook（`useSyncExternalStoreWithSelector`），写进 `onClick`/`async` 回调会抛 hook 规则错误并被未处理 rejection 吞掉，表现为「点了没反应」。
+- 窄屏不能按图标对齐面板：宿主在 `<=640px` 会重排输入框那一行，图标可能落到屏幕最左，`absolute + right:0` 的面板必然出屏。用 `position:fixed` + `left/right` 双向锚定贴视口，并显式把 base 的 `bottom` 盖成 `auto`。
