@@ -77,7 +77,7 @@ const h = (type, props, ...kids) => ({ type, props: props || {}, kids });
 // （先前只重渲染一次就断言，面板永远读不到——假红。）
 // 假 React 的 state/ref 要跨渲染稳定：hook 调用顺序固定，所以用「每次渲染从 0 重新
 // 计数 + 全局槽位数组」来还原 React 语义。点击改的是 state，断言必须再渲染一次才看得见新树。
-const ui = { s: [], refs: [], cur: 0, refCur: 0 };
+const ui = { s: [], refs: [], cur: 0, refCur: 0, cleanups: [] };
 const fakeReact = {
   createElement: h,
   useState: (init) => {
@@ -85,7 +85,9 @@ const fakeReact = {
     if (!(i in ui.s)) ui.s[i] = init;
     return [ui.s[i], (v) => { ui.s[i] = typeof v === "function" ? v(ui.s[i]) : v; }];
   },
-  useEffect: () => {},
+  // useEffect 空白实现 = 挂载副作用永不执行 → 「挂载时偷偷拉目录」这类变异永远绿。
+  // 这里真实记录：第一次调用=挂载，第二个参数进来的是清理函数；卸载时清空，可重挂。
+  useEffect: (fn) => { const clean = fn(); if (typeof clean === "function") ui.cleanups.push(clean); },
   useRef: (v) => {
     const i = ui.refCur++;
     if (!(i in ui.refs)) ui.refs[i] = { current: v };
@@ -162,7 +164,11 @@ const render = (props = INPUT, m = mounted) => {
     inRender = false;
   }
 };
+// fresh = 一个新场景（新页面）：先卸载旧的（跑清理函数、state/ref 丢掉），
+// 再挂一次。useEffect 会在这次渲染里真实触发，所以「挂载时偷偷拉目录」
+// 「挂载时注入全局样式」这类副作用现在能被抓到（之前 useEffect 是空实现）。
 const fresh = (props = INPUT, m = mounted) => {
+  while (ui.cleanups.length) ui.cleanups.pop()();
   ui.s.length = 0;
   ui.refs.length = 0;
   calls.length = 0;
@@ -184,6 +190,10 @@ const deepFind = (node, pred) => {
   if (Array.isArray(node.kids)) for (const k of node.kids) { const hit = deepFind(k, pred); if (hit) return hit; }
   return pred(node) ? node : undefined;
 };
+// 渲染整棵树再递归找：空闲态断言要的是「整棵树上什么都没有」，
+// 不能只 peek 面板子节点——那样面板没渲染时 deepFind 当然也找不到。
+const getSelect = (props, m) => deepFind(render(props, m), (k) => k.type === "select");
+const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.className === "po-model");
 
 // --- 空闲态：只有按钮，没有面板 ---
 {
@@ -231,8 +241,25 @@ const deepFind = (node, pred) => {
   await flush();
   t = render(INPUT);
   assert.equal(calls.filter((c) => c.method === "GET").length, getsBefore, "目录是缓存的，同一页面不该反复拉");
-  const sel = deepFind(panel(t), (k) => k.type === "select");
+    const sel = deepFind(panel(t), (k) => k.type === "select");
   assert.ok(sel.kids.length > 1, "再打开时模型列表应立刻在，不用等网络");
+}
+
+// --- 没点就不该有面板，也不该发任何请求 ---
+// 用户报「有时候啥都不点还是会加载模型」：挂载/重渲染/父组件刷新都不该碰网络。
+{
+  const tree = fresh(INPUT, mount);
+  // 再多渲染十次：宿主重渲染（切会话、输入内容变化）会反复走到这里
+  for (let i = 0; i < 10; i++) {
+    const t = render(INPUT, mount);
+    assert.equal(calls.length, 0, "渲染不该发请求");
+    assert.equal(panel(t), undefined, "没点就不该有面板");
+    assert.equal(getSelect(INPUT, mount), undefined, "没点就不该有下拉框");
+    assert.equal(getModelIcon(INPUT, mount), undefined, "没点就不该有加载中标记");
+  }
+  const btnNode = tree.kids.find((k) => k && k.type === "button");
+  assert.ok(btnNode, "空闲态也得有按钮");
+  assert.equal(btnNode.props.disabled, false, "空闲时按钮不该被禁用");
 }
 
 // --- 「用这条」写回草稿：必须「替换整段」，不是追加 ---
