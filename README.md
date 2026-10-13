@@ -16,7 +16,18 @@
 
 ## 安装
 
-在已安装本插件的 DSH profile 里（与 `dsh-free-search` 同目录）跑 `pnpm install`。注意 profile 的 `node_modules` 是**真实拷贝不是 symlink**，改完仓库里的 `lib/*.js` 必须重新安装或手工 `Copy-Item` 到 profile 才生效。改宿主侧 `lib/index.js` 还要重启 DSH（客户端 bundle 刷新页面即可）。
+从 GitHub 装（换一台电脑也是这样）：
+
+```bash
+# 1) 在 DSH profile 目录（~/.dsh/profiles/<name>）里加依赖
+pnpm add github:bansheng2000/dsh-prompt-optimizer
+# 2) 把 "dsh-prompt-optimizer" 加进该 profile package.json 的 dsh.profile.bundles 数组
+# 3) 重启 DSH
+```
+
+宿主条目 `prompt-optimizer` 由包内 `cordis.patch.yml`（`- insert:` 形态）自动注册，不需要手写宿主配置。装完输入框右侧就有图标按钮。
+
+本地开发：profile 的 `node_modules` 是**真实拷贝不是 symlink**，改完仓库里的 `lib/*.js` 必须重新跑 `pnpm install` 或手工 `Copy-Item` 到 profile 才生效。改宿主侧 `lib/index.js` 还要重启 DSH（客户端 bundle 刷新页面即可）。
 
 ## 配置
 
