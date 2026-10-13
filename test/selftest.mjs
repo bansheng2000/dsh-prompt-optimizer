@@ -72,12 +72,25 @@ const fakeFetch = async (url, init) => {
   return { status: 200, json: async () => ({ ok: true, value: { text: "改写结果" } }) };
 };
 const h = (type, props, ...kids) => ({ type, props: props || {}, kids });
+// 假 DOM 节点：面板位移要量 offsetWidth / getBoundingClientRect，宿主组件要用
+// addEventListener。面板几何默认给一套「桌面：图标在视口右侧够宽处」的值，
+// 需要别的布局就用 LAYOUT 覆盖。
+let LAYOUT = { panelWidth: 420, wrapRight: 1200, vw: 1440, vh: 900 };
+const mkStyle = () => {
+  const props = {};
+  return { props, setProperty: (k, v) => { props[k] = v; }, removeProperty: (k) => { delete props[k]; } };
+};
+// 面板和 wrap 都是单例：clampPanel 写入 --po-shift，断言要读回同一个对象。
+let panelNode = { style: mkStyle(), get offsetWidth() { return LAYOUT.panelWidth; }, getBoundingClientRect: () => ({ left: 0, right: LAYOUT.panelWidth }) };
+const wrapNode = { style: mkStyle(), querySelector: (sel) => (sel === ".po-panel" ? panelNode : null),
+  getBoundingClientRect: () => ({ left: LAYOUT.wrapRight - 33, right: LAYOUT.wrapRight, top: 840, bottom: 866, width: 33, height: 26 }) };
+const resetLayout = (next) => { LAYOUT = next; panelNode.style = mkStyle(); };
 
 // 状态槽要跨渲染留存：点击改的是 state，断言必须重渲染后才看得见新树。
 // （先前只重渲染一次就断言，面板永远读不到——假红。）
 // 假 React 的 state/ref 要跨渲染稳定：hook 调用顺序固定，所以用「每次渲染从 0 重新
 // 计数 + 全局槽位数组」来还原 React 语义。点击改的是 state，断言必须再渲染一次才看得见新树。
-const ui = { s: [], refs: [], cur: 0, refCur: 0, cleanups: [] };
+const ui = { s: [], refs: [], cur: 0, refCur: 0, effectCur: 0, effects: [] };
 const fakeReact = {
   createElement: h,
   useState: (init) => {
@@ -85,12 +98,24 @@ const fakeReact = {
     if (!(i in ui.s)) ui.s[i] = init;
     return [ui.s[i], (v) => { ui.s[i] = typeof v === "function" ? v(ui.s[i]) : v; }];
   },
-  // useEffect 空白实现 = 挂载副作用永不执行 → 「挂载时偷偷拉目录」这类变异永远绿。
-  // 这里真实记录：第一次调用=挂载，第二个参数进来的是清理函数；卸载时清空，可重挂。
-  useEffect: (fn) => { const clean = fn(); if (typeof clean === "function") ui.cleanups.push(clean); },
+  // useEffect 要按 React 的 deps 语义跑：deps 没变就完全不碰（否则每次重渲染都重复
+  // 注册事件监听，测试会数出 2 个）；变了则先跑上一次的清理再跑新的。
+  // 空实现 = 挂载副作用永不执行 → 「挂载时偷偷拉目录」这类变异永远绿。
+  useEffect: (fn, deps) => {
+    const i = ui.effectCur++;
+    const prev = ui.effects[i];
+    const same = prev !== undefined && Array.isArray(deps) && Array.isArray(prev.deps)
+      && deps.length === prev.deps.length && deps.every((d, k) => Object.is(d, prev.deps[k]));
+    if (same) return;
+    if (prev && typeof prev.cleanup === "function") prev.cleanup();
+    const cleanup = fn();
+    ui.effects[i] = { deps, cleanup: typeof cleanup === "function" ? cleanup : null };
+  },
+  // ref 要拿到真实节点：React 在提交时把 DOM 填进 ref.current。组件树里第一个带 ref
+  // 的元素就是 .po-wrap，这里直接给个假节点（含 querySelector/offsetWidth）。
   useRef: (v) => {
     const i = ui.refCur++;
-    if (!(i in ui.refs)) ui.refs[i] = { current: v };
+    if (!(i in ui.refs)) ui.refs[i] = { current: v === null ? wrapNode : v };
     return ui.refs[i];
   },
   useCallback: (fn) => fn,
@@ -108,8 +133,16 @@ const sandbox = { fetch: fakeFetch }; // 可换 fetch，用来模拟慢请求
 function mountClient() {
   let registration;
   const style = { tag: null };
+  // 组件要在 resize 上挂 clampPanel，沙箱 window 必须有事件接口；顺便记下挂了几个，
+  // 断言「面板关闭后不监听」。
+  const win = {
+    __ModuleLoader__: { load: (r) => { registration = r; } },
+    listeners: {},
+    addEventListener(t, fn) { (win.listeners[t] ??= []).push(fn); },
+    removeEventListener(t, fn) { win.listeners[t] = (win.listeners[t] || []).filter((f) => f !== fn); },
+  };
   vm.runInNewContext(clientSrc, {
-    window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
+    window: win,
     document: {
       baseURI: fakeDocument.baseURI,
       createElement: () => (style.tag = { setAttribute() {}, remove() {}, textContent: "" }),
@@ -135,7 +168,7 @@ function mountClient() {
   });
   assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
   assert.equal(registered.options.id, "prompt-optimizer");
-  return { registered, style };
+  return { registered, style, win };
 }
 const mount = mountClient();
 
@@ -157,6 +190,7 @@ let mounted = mount;
 const render = (props = INPUT, m = mounted) => {
   ui.cur = 0;
   ui.refCur = 0;
+  ui.effectCur = 0; // effect 槽按「本次渲染内的 hook 序号」索引，必须和 state/ref 一样每次归零
   inRender = true;
   try {
     return m.registered.Comp(props);
@@ -168,7 +202,9 @@ const render = (props = INPUT, m = mounted) => {
 // 再挂一次。useEffect 会在这次渲染里真实触发，所以「挂载时偷偷拉目录」
 // 「挂载时注入全局样式」这类副作用现在能被抓到（之前 useEffect 是空实现）。
 const fresh = (props = INPUT, m = mounted) => {
-  while (ui.cleanups.length) ui.cleanups.pop()();
+  for (const e of ui.effects) if (e && typeof e.cleanup === "function") e.cleanup();
+  ui.effects.length = 0;
+  ui.effectCur = 0;
   ui.s.length = 0;
   ui.refs.length = 0;
   calls.length = 0;
@@ -243,6 +279,43 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.equal(calls.filter((c) => c.method === "GET").length, getsBefore, "目录是缓存的，同一页面不该反复拉");
     const sel = deepFind(panel(t), (k) => k.type === "select");
   assert.ok(sel.kids.length > 1, "再打开时模型列表应立刻在，不用等网络");
+}
+
+// --- 面板出屏夹取（桌面端报「不行」的根因）---
+// 面板 right:0 贴着图标往左展开，图标离视口左边不足面板宽时整块跑到屏幕外，
+// 只剩右边几个控件可见（截图里标题/下拉/文本全在屏外）。clampPanel 量左溢出写
+// --po-shift，transform 把它平回来。
+{
+  // 桌面：图标右缘 1200，视口 1440，面板 420 → 面板左缘 780，够宽，不需要位移
+  resetLayout({ panelWidth: 420, wrapRight: 1200, vw: 1440, vh: 900 });
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  t = render(INPUT); // 重渲染才跑 effect（假 React 没有调度器，靠 render() 推进）
+  assert.equal(panelNode.style.props["--po-shift"], undefined,
+    "图标离左边够远时不该位移（--po-shift 要被删掉，否则会平出右边）");
+  // 左侧栏一开：图标右缘只剩 300，面板左缘 = 300-420 = -120 → 需要右移 128
+  resetLayout({ panelWidth: 420, wrapRight: 300, vw: 1440, vh: 900 });
+  t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  t = render(INPUT);
+  assert.equal(panelNode.style.props["--po-shift"], "128px",
+    "左溢出 120 + 8px 安全边 = 右移 128");
+  // resize 时要重新夹：视口变窄后再夹一次
+  LAYOUT = { panelWidth: 420, wrapRight: 100, vw: 1440, vh: 900 };
+  const handlers = mounted.win.listeners.resize || [];
+  assert.ok(handlers.length === 1, "面板开着时要监听 resize");
+  handlers[0]();
+  assert.equal(panelNode.style.props["--po-shift"], "328px", "resize 后按新布局重算溢出");
+  // 面板收起后必须解绑，别在关闭状态白跑几何。
+  // 注意要再 render 一次：清理函数是在 open 变 false 的那次渲染里跑的（真实 React
+  // 在 commit 阶段解绑），点完就断言等于断言得太早。
+  t = render(INPUT);
+  await btn(t).onClick();
+  await flush();
+  render(INPUT);
+  assert.equal((mounted.win.listeners.resize || []).length, 0, "面板关闭后要解绑 resize");
 }
 
 // --- 没点就不该有面板，也不该发任何请求 ---
@@ -510,13 +583,14 @@ const narrowPanel = /\.po-panel \{([^}]*)\}/.exec(narrowBody)[1];
 assert.ok(/\bbottom:\s*auto/.test(narrowPanel),
   "窄屏面板必须把 base 的 bottom:calc(100% + 6px) 显式盖成 auto，否则会和 top 一起把面板高度撑爆");
 assert.ok(!/\bbottom:\s*(?!auto)[^;]*\d/.test(narrowPanel), "窄屏面板的 bottom 只能是 auto");
-// token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字。
+// token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字，
+// 外加本插件自己写入的 --po-shift（面板位移，clampPanel 在开面板时 setProperty）。
 const KNOWN_TOKENS = new Set([
   "--dsw-alias-label-primary", "--dsw-alias-label-secondary", "--dsw-alias-state-error-primary",
   "--dsw-alias-state-business-primary", "--dsw-alias-border-l1", "--dsw-alias-bg-layer-1",
   "--dsw-alias-interactive-bg-hover", "--dsw-radius-sm", "--dsw-radius-panel",
   "--dsw-elevation-panel", "--dsw-specific-input-major", "--dsw-font-family",
-  "--dsw-font-xs-13", "--dsw-font-xxs-12",
+  "--dsw-font-xs-13", "--dsw-font-xxs-12", "--po-shift",
 ]);
 for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
   assert.ok(KNOWN_TOKENS.has(m[1]), `未知宿主 token，拼错会静默不生效：${m[1]}`);
