@@ -1,2 +1,4 @@
 # dependencies - installed into the DSH profile as a real copy, not publishable
 node_modules/
+# layout probe output: 20 PNGs per run, regenerate with test/cdp-probe.mjs
+test/shots/
