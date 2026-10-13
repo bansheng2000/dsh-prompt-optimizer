@@ -46,6 +46,7 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 - `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册 `conversation.input.right` slot 条目 `prompt-optimizer`，并注入以 `.po-wrap` 为作用域根的样式。
 - `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt / `pickModel`），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。
+- `test/layout-probe.html` + `test/cdp-probe.mjs` — 布局探针：真 Edge headless + CDP，把 client.js 的真 STYLE 灌进页面量面板边界，跨 20 种视口比例（桌面/小窗/平板/超宽矮窗/手机/断点两侧 + 图标位置 x=40/100/300/700）断言不出屏。`node test/cdp-probe.mjs <probe-url> <出图目录>`，截图落在 `test/shots/`（已 gitignore）。
 
 ## 宿主契约（踩过的坑）
 
@@ -57,3 +58,4 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 - **写回整段草稿只能用 `setDraft`。** `insertText(span, text)` 替换的是**你传进去的那个 span**，而 `captureInsertion()` 返回的是光标位置（塌缩 span）——用它会把改写结果追加到原文**后面**。`setDraft(text)` 的语义是「替换整段草稿」（清空 → 按换行拆段重写 → 光标落到末尾），才是「把原内容换掉」。
 - 客户端 hook 只能在渲染期调用：`props.useInput` 是宿主 `materializeStandardBinding` 生成的 React selector hook（`useSyncExternalStoreWithSelector`），写进 `onClick`/`async` 回调会抛 hook 规则错误并被未处理 rejection 吞掉，表现为「点了没反应」。
 - 窄屏不能按图标对齐面板：宿主在 `<=640px` 会重排输入框那一行，图标可能落到屏幕最左，`absolute + right:0` 的面板必然出屏。用 `position:fixed` + `left/right` 双向锚定贴视口，并显式把 base 的 `bottom` 盖成 `auto`。
+- **桌面端面板出屏**：面板 `right: 0` 贴图标往左展开 420px，图标离视口左边不够一整面板宽时整块出屏（左侧栏一开必现）。解法是 `transform: translateX(var(--po-shift, 0px))` + 开面板时按锚点**右缘**算左溢出：`8 + panel.offsetWidth - wrap.getBoundingClientRect().right`。两条细节：清零必须 `removeProperty`（赋空串会让 `var()` 解析失败，整条 `transform` 变 invalid）；算溢出必须用锚点**右缘**（`right:0` 时面板左缘 = 锚点右缘 - 面板宽，用 `left` 算会整块偏一个面板宽）。窄屏 `@media` 里补 `transform: none`。
