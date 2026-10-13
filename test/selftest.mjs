@@ -101,29 +101,41 @@ const fakeDocument = {
   head: { appendChild() {} },
 };
 const sandbox = { fetch: fakeFetch }; // 可换 fetch，用来模拟慢请求
-vm.runInNewContext(clientSrc, {
-  window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
-  document: fakeDocument,
-  URL,
-  console,
-  clearTimeout: () => {},
-  setTimeout: () => 0,
-  get fetch() { return sandbox.fetch; },
-});
-assert.equal(registration.id, "dsh-prompt-optimizer");
-const face = registration.factory((spec) => {
-  assert.equal(spec, "react", "客户端只该向宿主模块表要 react");
-  return fakeReact;
-});
-assert.equal(typeof face.apply, "function");
-assert.equal(face.inject.join(","), "slots");
-let registered;
-face.apply({
-  effect: (fn) => fn(),
-  slots: { inject: (key, fn) => fn(), register: (options, Comp) => { registered = { options, Comp }; } },
-});
-assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
-assert.equal(registered.options.id, "prompt-optimizer");
+// 每次调用 = 一次页面加载：client.js 里的目录缓存是模块级状态，重新挂一次就回到
+// 「本页还没拉过目录」。第一个挂载同时做契约断言（模块 id / 只向宿主要 react / inject 槽）。
+function mountClient() {
+  let registration;
+  const style = { tag: null };
+  vm.runInNewContext(clientSrc, {
+    window: { __ModuleLoader__: { load: (r) => { registration = r; } } },
+    document: {
+      baseURI: fakeDocument.baseURI,
+      createElement: () => (style.tag = { setAttribute() {}, remove() {}, textContent: "" }),
+      head: { appendChild() {} },
+    },
+    URL,
+    console,
+    clearTimeout: () => {},
+    setTimeout: () => 0,
+    get fetch() { return sandbox.fetch; },
+  });
+  assert.equal(registration.id, "dsh-prompt-optimizer");
+  const face = registration.factory((spec) => {
+    assert.equal(spec, "react", "客户端只该向宿主模块表要 react");
+    return fakeReact;
+  });
+  assert.equal(typeof face.apply, "function");
+  assert.equal(face.inject.join(","), "slots");
+  let registered;
+  face.apply({
+    effect: (fn) => fn(),
+    slots: { inject: (key, fn) => fn(), register: (options, Comp) => { registered = { options, Comp }; } },
+  });
+  assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
+  assert.equal(registered.options.id, "prompt-optimizer");
+  return { registered, style };
+}
+const mount = mountClient();
 
 // 宿主 useInput 是 materializeStandardBinding 生成的 React selector hook，只能在渲染期调。
 // 之前的 bug：把它写在 onClick 的异步回调里 → 非渲染期调 hook 抛错 → 面板弹了但是空的、
@@ -138,21 +150,23 @@ const INPUT = {
   inputActions: { captureInsertion: () => ({ start: 0, end: 6, draftRev: 3 }), insertText: () => {} },
 };
 // render = 再渲染一次（state/ref 保留）；fresh = 开一个新场景（state 全清、请求记录全清）。
-const render = (props = INPUT) => {
+// 第二个参数是 mountClient() 的返回值：传了就用那份挂载（另一个「页面」）的组件和样式。
+let mounted = mount;
+const render = (props = INPUT, m = mounted) => {
   ui.cur = 0;
   ui.refCur = 0;
   inRender = true;
   try {
-    return registered.Comp(props);
+    return m.registered.Comp(props);
   } finally {
     inRender = false;
   }
 };
-const fresh = (props = INPUT) => {
+const fresh = (props = INPUT, m = mounted) => {
   ui.s.length = 0;
   ui.refs.length = 0;
   calls.length = 0;
-  return render(props);
+  return render(props, m);
 };
 // 目录是 fire-and-forget：loadCatalog().then(setCat) 不在 await 链上，
 // 断言下拉框之前得先把微任务排干，否则还在加载中。
@@ -165,6 +179,11 @@ const actBtn = (tree, label) =>
     .find((k) => k && k.type === "button" && k.kids[0] === label);
 const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
   .find((k) => k && k.props && k.props.className === "po-msg");
+const deepFind = (node, pred) => {
+  if (!node || typeof node !== "object") return undefined;
+  if (Array.isArray(node.kids)) for (const k of node.kids) { const hit = deepFind(k, pred); if (hit) return hit; }
+  return pred(node) ? node : undefined;
+};
 
 // --- 空闲态：只有按钮，没有面板 ---
 {
@@ -201,6 +220,19 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
   // 改文本框 → 状态更新
   ta.props.onChange({ target: { value: "我自己改的" } });
   assert.equal(ui.s[2], "我自己改的", "文本框改动要进 state");
+  // 再点收起、再点打开：目录不该再拉一次。用户报「有时候还是会刷新模型列表」——
+  // 每次点开都重新 GET，下拉框会先塌回「跟随会话模型」再跳出来，看着像列表在闪。
+  const getsBefore = calls.filter((c) => c.method === "GET").length;
+  await btn(t).onClick(); // 收起
+  await flush();
+  t = render(INPUT);
+  assert.equal(panel(t), undefined, "再点收起");
+  await btn(t).onClick(); // 再打开
+  await flush();
+  t = render(INPUT);
+  assert.equal(calls.filter((c) => c.method === "GET").length, getsBefore, "目录是缓存的，同一页面不该反复拉");
+  const sel = deepFind(panel(t), (k) => k.type === "select");
+  assert.ok(sel.kids.length > 1, "再打开时模型列表应立刻在，不用等网络");
 }
 
 // --- 「用这条」写回草稿：必须「替换整段」，不是追加 ---
@@ -334,17 +366,30 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
 
 // --- 目录拿不到也不影响改写（下拉框退回「跟随会话模型」）---
 {
+  // 缓存是模块级状态，早先的用例已经把好目录缓下来了，必须整份重新挂一次 client.js
+  // 才能回到「本页还没拉过目录」的状态——直接改 catalogBroken 是不生效的（踩过）。
+  const reloaded = await mountClient();
   catalogBroken = true;
-  let t = fresh(INPUT);
+  let t = fresh(INPUT, reloaded);
   await btn(t).onClick();
   await flush();
   await flush();
-  t = render(INPUT);
-  assert.equal(panel(t).kids.find((k) => k && k.type === "textarea").props.value, "改写结果",
+  t = render(INPUT, reloaded);
+  assert.equal(deepFind(panel(t), (k) => k.type === "textarea").props.value, "改写结果",
     "拉不到模型目录也要照样出结果");
-  const selEl = panelRows(t).flatMap((r) => r.kids).find((k) => k && k.type === "select");
+  const selEl = deepFind(panel(t), (k) => k.type === "select");
   assert.equal(selEl.kids.filter((k) => k && k.type === "option").length, 1, "目录挂了只剩「跟随会话模型」一项");
+  // 失败不该被缓存住：目录恢复后下次打开必须重试，否则一次抖动就永远是单选项。
   catalogBroken = false;
+  const getsAfterFail = calls.filter((c) => c.method === "GET").length;
+  await btn(t).onClick(); // 收起
+  await flush();
+  t = render(INPUT, reloaded);
+  await btn(t).onClick(); // 再打开
+  await flush();
+  t = render(INPUT, reloaded);
+  assert.ok(calls.filter((c) => c.method === "GET").length > getsAfterFail, "目录失败后要允许下次重试");
+  assert.ok(deepFind(panel(t), (k) => k.type === "select").kids.length > 1, "恢复后模型列表要出来");
 }
 
 // --- 请求还在飞时再点：不能重复发（busy 守卫）---
@@ -391,7 +436,7 @@ const msgOf = (tree) => panelRows(tree).flatMap((r) => r.kids)
   sandbox.fetch = fakeFetch;
 }
 // --- CSS 断言（图标尺寸 + all:unset 保持不变）---
-const styleCss = injectedStyle.textContent;
+const styleCss = mount.style.tag.textContent;
 const iconCss = /\.po-icon \{([^}]*)\}/.exec(styleCss)[1];
 const btnCss = /\.po-btn \{([^}]*)\}/.exec(styleCss)[1];
 const btnDecl = btnCss.replace(/\/\*[\s\S]*?\*\//g, "");
