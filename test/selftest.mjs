@@ -1,6 +1,14 @@
 // 自测：不连宿主，只验纯逻辑 + insertText 的冲突分支语义（照宿主复刻的最小形状）。
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// 用量台账会落盘：所有 apply() 都指到临时目录，绝不碰真机 profile 里那本账。
+const TMP_DIR = join(tmpdir(), "po-usage-test-" + process.pid);
+const TMP = join(TMP_DIR, "usage.json");
+rmSync(TMP_DIR, { recursive: true, force: true });
 import { checkRequest, normalizePromptify, SYSTEM_PROMPT, userPrompt, fail } from "../lib/optimize.js";
 
 // --- checkRequest ---
@@ -561,7 +569,8 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.match(line, /缓存读 200/, "缓存读写要单列");
   assert.match(line, /成功 1 \/ 尝试 2/, "重试/失败也要让用户看见（那里也花了钱）");
   assert.ok(!/约/.test(line), "没配单价就只能报 token，不许出现金额");
-  assert.match(el.props.title, /进程内累计/, "悬停先讲统计范围（哪一段账、何时起算）");
+  assert.match(el.props.title, /累计至今/, "悬停先讲统计范围（哪一段账、何时起算）");
+  assert.match(el.props.title, /重启不清零/, "悬停要说清这是持久账，不是本次进程的账");
   assert.match(el.props.title, /输入 1,234/, "悬停里给精确值——缩写只是显示层");
   assert.match(el.props.title, /合计 2,001/, "悬停里的合计也要精确");
   assert.match(el.props.title, /不含普通聊天/, "悬停要把口径写全（只算本插件的改写请求）");
@@ -653,7 +662,7 @@ for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
 const { apply } = await import("../lib/index.js");
 let route, dispose;
 apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
-  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, {});
+  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP } });
 assert.equal(route.kind, "exact");
 assert.equal(route.path, "/prompt-optimizer/api", "路由路径必须带前导斜杠，否则宿主 match() 匹配不到");
 
@@ -720,7 +729,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     // 真实形状：宿主 ClientSessions 没有 current()（照 dsh-api-session-controller 抄）
     sessions: {},
     webServer: { register: (r) => { r3 = r; return () => {}; } },
-  }) }, {});
+  }) }, { rules: { storeFile: TMP } });
   assert.equal(r3.path, "/prompt-optimizer/api");
   const callWith = (method, body) => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -799,7 +808,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       // 没有它 resolveTarget 会返回 null → 503 no-route，根本走不到查询用量的那段
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
       webServer: { register: (x) => { r = x; return () => {}; } },
-    }) }, config ?? {});
+    }) }, { rules: { storeFile: TMP, ...(config?.rules ?? {}) } });
     return r;
   };
   const call = (r, method, body) => new Promise((resolve) => {
@@ -822,7 +831,8 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   const p0 = (await call(plain, "GET", "")).payload.value.usage;
   assert.equal(p0.cost, null, "没配单价 → cost 必须是 null，不许编造价格");
   assert.equal(p0.priceSource, null, "没配单价 → priceSource 也是 null（没有来源就没有数字）");
-  assert.equal(p0.scope, "process", "统计范围是「本插件进程内累计」");
+  assert.equal(p0.scope, "persistent", "统计范围是「跨重启累计」");
+  assert.equal(p0.store, TMP, "快照要带落盘路径，用户得知道账在哪");
   assert.ok(typeof p0.since === "number" && p0.since <= Date.now(), "since = 台账起点（模块加载时刻）");
   const r1 = await call(plain, "POST", JSON.stringify({ text: "hi" }));
   assert.equal(r1.status, 200);
@@ -867,5 +877,56 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(f2.input - b2.input, 110, "两次尝试的输入 token 都要累计");
   assert.equal(f2.output - b2.output, 50);
   assert.equal(f2.requests - b2.requests, 1, "成功仍只算一次");
+}
+
+// --- 用量台账：重启不清零（用户 2026-10：「改成一直统计」）---
+{
+  const saved = JSON.parse(readFileSync(TMP, "utf8"));
+  assert.ok(saved.input > 0 && saved.since > 0, "每次改写收尾都要把账写盘");
+
+  // 换一个全新的模块实例（query 让 ESM 缓存失效 ≈ DSH 重启），读同一个文件
+  const boot = async (query, config, ctxExtra) => {
+    let r;
+    const { apply: ap } = await import("../lib/index.js" + query);
+    // ctxExtra 要挂在外层 ctx 上：storeFileFor 读的是 apply(ctx, config) 的 ctx
+    // （profileContext 服务比 slot/webServer 更靠外），不是 inject 回调里的 sctx。
+    ap({
+      inject: (deps, fn) => fn({
+        effect: (f) => { f(); },
+        llm: { listProviders: () => [], listModels: async () => [] },
+        webServer: { register: (x) => { r = x; return () => {}; } },
+      }),
+      ...ctxExtra,
+    }, config);
+    return r;
+  };
+  const call2 = (r, method) => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t2) { this.payload = JSON.parse(t2); resolve(this); } };
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+      on(ev2, fn) { this[ev2] = fn; }, destroy() {} };
+    r.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from("")); req.end(); } }, 0);
+  });
+
+  const rebooted = await boot("?reboot=1", { rules: { storeFile: TMP } });
+  const back = (await call2(rebooted, "GET")).payload.value.usage;
+  assert.equal(back.input, saved.input, "重启后接着盘上的账继续累计，不能清零");
+  assert.equal(back.attempts, saved.attempts);
+  assert.equal(back.since, saved.since, "台账起点沿用第一笔账的时刻，不是本次启动");
+  assert.equal(back.scope, "persistent");
+
+  // 没配 storeFile → 用宿主发布的 profileContext.dir（每个 profile 一本账）
+  const byProfile = await boot("?reboot=2", {}, { get: (n) => (n === "profileContext" ? { dir: TMP_DIR } : undefined) });
+  assert.equal((await call2(byProfile, "GET")).payload.value.usage.store,
+    join(TMP_DIR, "prompt-optimizer-usage.json"), "默认落在 profile 目录里");
+
+  // 文件被删/损坏 → 从零开始，不许抛
+  rmSync(TMP, { force: true });
+  const clean = await boot("?reboot=3", { rules: { storeFile: TMP } });
+  const zero = (await call2(clean, "GET")).payload.value.usage;
+  assert.equal(zero.input, 0, "账本丢了就从零开始，不影响改写");
+  assert.equal(zero.scope, "persistent");
 }
 console.log("ok - prompt-optimizer self-test passed");

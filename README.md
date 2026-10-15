@@ -51,7 +51,7 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 ```
 
 数字超过 1000 就缩成 `K`/`M`/`B`（`1234` → `1.2K`、`2001` → `2K`、`1234567890` → `1.2B`），一行放得下；**精确值在悬停提示里**。
-悬停先讲统计范围（哪一段账、何时起算、不含什么），再给逐项精确到个位的数字，最后是单价来源。
+悬停先讲统计范围（哪一段账、何时起算、不含什么、账本在哪），再给逐项精确到个位的数字，最后是单价来源。
 
 **口径**（宿主 `TokenUsage` 的定义，asar 实测：`usage.totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens`）：
 
@@ -59,8 +59,21 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 - 输入/输出**分开写**是刻意的：两者单价常差一个数量级，合并成一个「token 数」就看不出钱花在哪。
 - `成功 N / 尝试 M`：M > N 说明有白花的调用（空响应自动重试那一次也算一次尝试）。
 
-**范围**：只统计**本插件自己发起的改写请求**（不含你平时的聊天），且是**进程内累计**——自 DSH 启动起跨会话求和，**重启归零**。悬停提示里带起算时间；不落盘。
-要跨重启的长期账单得另写 profile 数据目录，目前没这个需求（`lib/index.js` 的 `LEDGER` 处留了 `ponytail:` 说明）。
+**范围与生命周期**：只统计**本插件自己发起的改写请求**（不含你平时的聊天），**跨重启累计**——每次改写收尾把台账写盘，下次启动读回，`since` 始终是第一笔账的时刻。
+落盘位置：`<profile>/prompt-optimizer-usage.json`（DSH 桌面端即 `~/.dsh/profiles/desktop/prompt-optimizer-usage.json`）。
+路径来自宿主发布的 `profileContext` 服务，**每个 profile 一本账**；取不到该服务的旧宿主退回 `~/.dsh/`。
+想换地方（或让多实例各记各的）就配 `rules.storeFile` 指到别的文件：
+
+```yaml
+- id: prompt-optimizer
+  name: "dsh-prompt-optimizer"
+  config:
+    rules:
+      storeFile: D:/dsh/prompt-optimizer-usage.json
+```
+
+写入是「同步 + 临时文件 rename」（一次几百字节、一次点击才写一回），所以不会留下半截文件；写不进去（只读盘、目录被删）也不影响改写，退回进程内累计。
+账本文件删掉/损坏就是从零开始，不是错误。悬停提示最后一行的「账本：」会告诉你当前用的是哪个文件，`GET /prompt-optimizer/api` 的 `value.usage.store` 也是同一个路径。
 
 **费用**：代码里**没有任何价格常量**，单价只从 profile 配置读；没配就只显示 token（接口里 `cost: null`、`priceSource: null`），**不猜价**。
 
