@@ -683,7 +683,9 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(followed.status, 200, "llm 可用且不指定 model 时应成功");
   assert.equal(used.provider + "/" + used.model, "hdr/hdr", "默认跟随会话模型");
   assert.equal(used.system, SYSTEM_PROMPT, "系统提示词必须原样传给模型");
-  assert.ok(used.maxTokens > 0, "maxTokens 传 0 等于不让模型说话");
+  // 4096 起步：推理模型（deepseek-v4.1-flash）会把 1024 全吃在 reasoning_content 上，
+  // 正文一个字符都不剩 —— 实测直连 opencode-go 就是这样。
+  assert.ok(used.maxTokens >= 4096, "推理模型的输出预算不能太小");
   assert.deepEqual(followed.payload.value.model, { provider: "hdr", model: "hdr" }, "响应要回显实际用的模型");
   assert.equal(followed.payload.value.text, "改写后的正文");
   // 带 model → 用客户端选的那个，不能被会话回落盖掉
@@ -696,6 +698,30 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   const blank = await callWith("POST", JSON.stringify({ text: "hi" }));
   assert.equal(blank.status, 502);
   assert.equal(blank.payload.error.code, "empty-response");
+  // 适配器失败不抛异常，只折成终止块 {type:"finish", reason:{kind,failure}}：以前只认
+  // text-delta，于是 429 / 超时 / 模型不存在全都被显示成同一句「model returned no text」。
+  fakeLlm.stream = () => (async function* () {
+    yield { type: "finish", reason: { kind: "error", failure: { code: "RATE_LIMITED", message: "upstream 429" } } };
+  })();
+  const failed = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(failed.status, 502);
+  assert.equal(failed.payload.error.code, "RATE_LIMITED", "要把 finish 块里的 failure.code 透给客户端");
+  assert.match(failed.payload.error.message, /upstream 429/);
+  // 推理模型把预算吃光 → finish{max-tokens}，正文为空，也要认出来
+  fakeLlm.stream = () => (async function* () { yield { type: "finish", reason: { kind: "max-tokens" } }; })();
+  const truncated = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(truncated.status, 502);
+  assert.equal(truncated.payload.error.code, "max-tokens");
+  // 第一次空响应 → 自动重试一次（用户现在的土办法就是「再点一下」）
+  let tries = 0;
+  fakeLlm.stream = () => (async function* () {
+    tries += 1;
+    if (tries === 1) return;
+    yield { type: "text-delta", text: "第二次成功" };
+  })();
+  const retried = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(retried.status, 200, "第一次空响应要自动重试一次");
+  assert.equal(retried.payload.value.text, "第二次成功");
   // 目录：这回 llm 可用，要真列出模型
   const cat = await callWith("GET", "");
   assert.equal(cat.payload.value.groups.length, 1, "零模型的 provider 不该出现在目录里");
