@@ -47,10 +47,11 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 面板底部有一行用量：
 
 ```
-累计 token：输入 1,234 · 输出 567 · 合计 2,001（缓存读 200 / 写 0） · 成功 1 / 尝试 2 · 约 0.0123 CNY
+累计 token：输入 12.3K · 输出 567 · 合计 2.1M（缓存读 200 / 写 0） · 成功 1 / 尝试 2 · 约 0.0123 CNY
 ```
 
-鼠标悬停会说明这份账的口径、起算时间与单价来源。
+数字超过 1000 就缩成 `K`/`M`/`B`（`1234` → `1.2K`、`2001` → `2K`、`1234567890` → `1.2B`），一行放得下；**精确值在悬停提示里**。
+悬停先讲统计范围（哪一段账、何时起算、不含什么），再给逐项精确到个位的数字，最后是单价来源。
 
 **口径**（宿主 `TokenUsage` 的定义，asar 实测：`usage.totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens`）：
 

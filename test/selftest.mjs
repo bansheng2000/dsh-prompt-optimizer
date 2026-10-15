@@ -555,13 +555,16 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   const el = statsEl(t);
   assert.ok(el, "宿主回了 usage 就该有用量行");
   const line = el.kids[0];
-  assert.match(line, /输入 1,234/, "输入 token 单独写出来");
-  assert.match(line, /输出 567/, "输出 token 单独写出来");
-  assert.match(line, /合计 2,001/, "合计单独写出来，不合并成一个含糊的数");
+  assert.match(line, /输入 1\.2K/, "过长的数字缩成 K/M/B，一行放得下");
+  assert.match(line, /输出 567/, "没到 1000 就照原样写，别把 567 写成 0.6K");
+  assert.match(line, /合计 2K/, "合计也跟着缩写");
   assert.match(line, /缓存读 200/, "缓存读写要单列");
   assert.match(line, /成功 1 \/ 尝试 2/, "重试/失败也要让用户看见（那里也花了钱）");
   assert.ok(!/约/.test(line), "没配单价就只能报 token，不许出现金额");
-  assert.match(el.props.title, /进程内累计/, "悬停要说明统计范围与生命周期");
+  assert.match(el.props.title, /进程内累计/, "悬停先讲统计范围（哪一段账、何时起算）");
+  assert.match(el.props.title, /输入 1,234/, "悬停里给精确值——缩写只是显示层");
+  assert.match(el.props.title, /合计 2,001/, "悬停里的合计也要精确");
+  assert.match(el.props.title, /不含普通聊天/, "悬停要把口径写全（只算本插件的改写请求）");
   assert.match(el.props.title, /未配单价/, "悬停要说明为什么没有金额");
   // 配了单价（宿主 rules.price）→ 金额出现，且悬停标出单价来源
   host = { ...host, price: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0, currency: "CNY" },
@@ -573,6 +576,15 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   const el2 = statsEl(t);
   assert.match(el2.kids[0], /约 0\.0123 CNY/, "配了单价才显示金额");
   assert.match(el2.props.title, /config\.rules\.price/, "悬停要写明单价来源，不留孤立数字");
+  // 十亿级也不能把面板撑爆：B + 一位小数，精确值仍在悬停里
+  host = { ...host, input: 1_234_567_890, output: 12_345, cacheRead: 0, cacheWrite: 0, total: 1_234_580_235 };
+  await actBtn(t, "重新生成").props.onClick();
+  await flush();
+  t = render(INPUT);
+  const el3 = statsEl(t);
+  assert.match(el3.kids[0], /输入 1\.2B/, "十亿级用 B");
+  assert.match(el3.kids[0], /输出 12\.3K/, "千级用 K 且保留一位小数");
+  assert.match(el3.props.title, /输入 1,234,567,890/, "悬停里仍是精确到个位的值");
   sandbox.fetch = fakeFetch;
 }
 // --- CSS 断言（图标尺寸 + all:unset 保持不变）---
