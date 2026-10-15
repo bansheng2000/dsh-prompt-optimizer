@@ -655,7 +655,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     listProviders: () => [{ id: "p-only", name: "Only" }, { id: "p-empty", name: "Empty" }],
     listModels: async (id) => (id === "p-empty" ? [] : [{ id: "m-only", name: "Only Model" }]),
     stream: (opts) => {
-      used = { provider: opts.provider, model: opts.model, system: opts.system, maxTokens: opts.maxTokens };
+      used = { provider: opts.provider, model: opts.model, system: opts.system, maxTokens: opts.maxTokens, sessionId: opts.sessionId };
       return (async function* () { yield { type: "text-delta", text: "改写后的正文" }; })();
     },
   };
@@ -665,7 +665,8 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     llm: fakeLlm,
     agentDefaultModel: { currentSelection: () => ({ provider: "session-model", model: "session-model" }) },
     agents: { get: () => ({ session: { requestHeader: () => ({ config: { provider: "hdr", model: "hdr" } }) } }) },
-    sessions: { current: () => ({ id: "s1" }) },
+    // 真实形状：宿主 ClientSessions 没有 current()（照 dsh-api-session-controller 抄）
+    sessions: {},
     webServer: { register: (r) => { r3 = r; return () => {}; } },
   }) }, {});
   assert.equal(r3.path, "/prompt-optimizer/api");
@@ -686,6 +687,10 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   // 4096 起步：推理模型（deepseek-v4.1-flash）会把 1024 全吃在 reasoning_content 上，
   // 正文一个字符都不剩 —— 实测直连 opencode-go 就是这样。
   assert.ok(used.maxTokens >= 4096, "推理模型的输出预算不能太小");
+  // opencode 系 provider（pi-ai 的 withOpenCodeSessionHeader）只在 sessionId 非空时补
+  // x-opencode-session 头，缺头就是上游 400 MissingSessionID —— 用户报的 400 就是这个。
+  assert.equal(typeof used.sessionId, "string", "sessionId 必须传给 llm.stream（缺头会 400）");
+  assert.ok(used.sessionId.length > 0, "sessionId 不能是空串，空串等于没传");
   assert.deepEqual(followed.payload.value.model, { provider: "hdr", model: "hdr" }, "响应要回显实际用的模型");
   assert.equal(followed.payload.value.text, "改写后的正文");
   // 带 model → 用客户端选的那个，不能被会话回落盖掉
