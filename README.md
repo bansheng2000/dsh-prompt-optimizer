@@ -37,12 +37,48 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 | --- | --- | --- |
 | `maxInputChars` | 8000 | 草稿超过该长度直接 413，不调 LLM |
 | `timeoutMs` | 60000 | 单次改写超时 |
+| `maxTokens` | 4096 | 单次输出预算（推理模型会先把预算花在 reasoning 上，别往下调） |
+| `price` | 不设 | 单价，用来算费用；格式见下文「用量统计」。**不设就只显示 token** |
 
 模型选择**不持久化**——每次开面板跟随会话模型，选了别的只对本次生效。这是刻意的：持久化要另接 settings 桥，目前没这个需求。
 
-## 文件
+## 用量统计
 
-- `lib/index.js` — 宿主侧：`kind: "exact"` 路由 `/prompt-optimizer/api`。`GET` → 模型目录；`POST {text, model?}` → `{ok:true, value:{text, model}}`，`model` 缺省即跟随会话。
+面板底部有一行用量：
+
+```
+累计 token：输入 1,234 · 输出 567 · 合计 2,001（缓存读 200 / 写 0） · 成功 1 / 尝试 2 · 约 0.0123 CNY
+```
+
+鼠标悬停会说明这份账的口径、起算时间与单价来源。
+
+**口径**（宿主 `TokenUsage` 的定义，asar 实测：`usage.totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens`）：
+
+- `输入` = 非缓存输入 token（`inputTokens`）、`输出` = 输出 token（`outputTokens`），缓存读/写单独标出，`合计` = 四项之和。
+- 输入/输出**分开写**是刻意的：两者单价常差一个数量级，合并成一个「token 数」就看不出钱花在哪。
+- `成功 N / 尝试 M`：M > N 说明有白花的调用（空响应自动重试那一次也算一次尝试）。
+
+**范围**：只统计**本插件自己发起的改写请求**（不含你平时的聊天），且是**进程内累计**——自 DSH 启动起跨会话求和，**重启归零**。悬停提示里带起算时间；不落盘。
+要跨重启的长期账单得另写 profile 数据目录，目前没这个需求（`lib/index.js` 的 `LEDGER` 处留了 `ponytail:` 说明）。
+
+**费用**：代码里**没有任何价格常量**，单价只从 profile 配置读；没配就只显示 token（接口里 `cost: null`、`priceSource: null`），**不猜价**。
+
+```yaml
+# <profile>/cordis.patch.yml —— prompt-optimizer 条目的配置覆盖层
+- id: prompt-optimizer
+  name: "dsh-prompt-optimizer"
+  config:
+    rules:
+      # 单位：currency / 百万 token（与 pi-ai 的 model.cost 同口径）
+      price: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3, currency: CNY }
+```
+
+填对价钱是你的事：插件不知道你在用哪家 provider、什么价目表。该数字填错只会让账算错，不会影响改写本身。改完配置要**重启 DSH**（bundle 配置是启动期读的）。
+
+**核对**：`GET /prompt-optimizer/api` 会连台账一起返回（`value.usage`），可拿来跟界面上那行对照。
+
+## 文件
+- `lib/index.js` — 宿主侧：`kind: "exact"` 路由 `/prompt-optimizer/api`。`GET` → 模型目录 + 用量台账（`value.usage`）；`POST {text, model?}` → `{ok:true, value:{text, model, usage}}`，`model` 缺省即跟随会话。台账 `LEDGER` 也在这一文件。
 - `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册 `conversation.input.right` slot 条目 `prompt-optimizer`，并注入以 `.po-wrap` 为作用域根的样式。
 - `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt / `pickModel`），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。

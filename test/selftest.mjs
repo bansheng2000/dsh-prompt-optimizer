@@ -535,6 +535,46 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.match(String(msgOf(t).kids[0] ?? ""), /生成失败.*模型不可用/, "失败原因要留在面板上");
   sandbox.fetch = fakeFetch;
 }
+// --- 用量行：宿主回带 usage 才有；输入/输出/合计分开；没配单价就只报 token ---
+{
+  let host = { input: 1234, output: 567, cacheRead: 200, cacheWrite: 0, total: 2001,
+    requests: 1, attempts: 2, failed: 0, since: 1700000000000, scope: "process",
+    price: null, priceSource: null, cost: null };
+  sandbox.fetch = async (url, init) => {
+    const method = init?.method ?? "GET";
+    calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, usage: host } }) };
+    return { status: 200, json: async () => ({ ok: true, value: { text: "带用量的结果", usage: host } }) };
+  };
+  const statsEl = (tree) => deepFind(tree, (k) => k && k.props && k.props.className === "po-stats");
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush();
+  await flush();
+  t = render(INPUT);
+  const el = statsEl(t);
+  assert.ok(el, "宿主回了 usage 就该有用量行");
+  const line = el.kids[0];
+  assert.match(line, /输入 1,234/, "输入 token 单独写出来");
+  assert.match(line, /输出 567/, "输出 token 单独写出来");
+  assert.match(line, /合计 2,001/, "合计单独写出来，不合并成一个含糊的数");
+  assert.match(line, /缓存读 200/, "缓存读写要单列");
+  assert.match(line, /成功 1 \/ 尝试 2/, "重试/失败也要让用户看见（那里也花了钱）");
+  assert.ok(!/约/.test(line), "没配单价就只能报 token，不许出现金额");
+  assert.match(el.props.title, /进程内累计/, "悬停要说明统计范围与生命周期");
+  assert.match(el.props.title, /未配单价/, "悬停要说明为什么没有金额");
+  // 配了单价（宿主 rules.price）→ 金额出现，且悬停标出单价来源
+  host = { ...host, price: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0, currency: "CNY" },
+    priceSource: "config.rules.price (DSH profile cordis.patch.yml)",
+    cost: { input: 0.003702, output: 0.008505, cacheRead: 0.00006, cacheWrite: 0, total: 0.012267, currency: "CNY" } };
+  await actBtn(t, "重新生成").props.onClick();
+  await flush();
+  t = render(INPUT);
+  const el2 = statsEl(t);
+  assert.match(el2.kids[0], /约 0\.0123 CNY/, "配了单价才显示金额");
+  assert.match(el2.props.title, /config\.rules\.price/, "悬停要写明单价来源，不留孤立数字");
+  sandbox.fetch = fakeFetch;
+}
 // --- CSS 断言（图标尺寸 + all:unset 保持不变）---
 const styleCss = mount.style.tag.textContent;
 const iconCss = /\.po-icon \{([^}]*)\}/.exec(styleCss)[1];
@@ -735,4 +775,85 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(cat.payload.value.default.provider, "session-model");
 }
 
+
+// --- 用量统计（宿主）：口径 / 累计 / 费用只从配置读 ---
+{
+  const reg = async (llm, config) => {
+    let r;
+    const { apply: ap } = await import("../lib/index.js");
+    ap({ inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm,
+      // 没有它 resolveTarget 会返回 null → 503 no-route，根本走不到查询用量的那段
+      agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+      webServer: { register: (x) => { r = x; return () => {}; } },
+    }) }, config ?? {});
+    return r;
+  };
+  const call = (r, method, body) => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t2) { this.payload = JSON.parse(t2); resolve(this); } };
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+      on(ev2, fn) { this[ev2] = fn; }, destroy() {} };
+    r.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
+  });
+  const withUsage = (u, text) => (async function* () {
+    yield { type: "usage", usage: u };
+    if (text) yield { type: "text-delta", text };
+  })();
+
+  // 没配单价：只报 token
+  const plain = await reg({ listProviders: () => [], listModels: async () => [],
+    stream: () => withUsage({ inputTokens: 1_000_000, outputTokens: 0 }, "结果") });
+  const p0 = (await call(plain, "GET", "")).payload.value.usage;
+  assert.equal(p0.cost, null, "没配单价 → cost 必须是 null，不许编造价格");
+  assert.equal(p0.priceSource, null, "没配单价 → priceSource 也是 null（没有来源就没有数字）");
+  assert.equal(p0.scope, "process", "统计范围是「本插件进程内累计」");
+  assert.ok(typeof p0.since === "number" && p0.since <= Date.now(), "since = 台账起点（模块加载时刻）");
+  const r1 = await call(plain, "POST", JSON.stringify({ text: "hi" }));
+  assert.equal(r1.status, 200);
+  const p1 = r1.payload.value.usage;
+  assert.equal(p1.input - p0.input, 1_000_000, "宿主 usage 块的输入 token 要入账");
+  assert.equal(p1.output - p0.output, 0);
+  assert.equal(p1.attempts - p0.attempts, 1, "一次尝试记一次");
+  assert.equal(p1.requests - p0.requests, 1, "成功返回正文记一次 requests");
+  assert.equal(p1.failed - p0.failed, 0);
+  assert.equal(p1.total, p1.input + p1.output + p1.cacheRead + p1.cacheWrite, "合计 = 输入+输出+缓存读+缓存写");
+  const g1 = (await call(plain, "GET", "")).payload.value.usage;
+  assert.ok(g1.total >= p1.total, "GET 也回带同一本账（人工核对通道）");
+
+  // 配了单价：单位「货币 / 百万 token」
+  const priced = await reg({ listProviders: () => [], listModels: async () => [],
+    stream: () => withUsage({ inputTokens: 1_000_000, outputTokens: 0 }, "结果") },
+    { rules: { price: { input: 3, output: 15, currency: "CNY" } } });
+  const before = (await call(priced, "GET", "")).payload.value.usage;
+  assert.equal(before.price.currency, "CNY");
+  assert.match(before.priceSource, /config\.rules\.price/, "单价来源要写明白，不留孤立数字");
+  const priced200 = await call(priced, "POST", JSON.stringify({ text: "hi" }));
+  const after = priced200.payload.value.usage;
+  assert.ok(Math.abs(after.cost.total - before.cost.total - 3) < 1e-9, "每百万输入 token × 单价 3");
+  assert.ok(Math.abs(after.cost.input - before.cost.input - 3) < 1e-9, "分项费用也要能算");
+  assert.equal(after.cost.cacheRead - before.cost.cacheRead, 0, "没配的字段按 0 算，不炸 NaN");
+
+  // 失败/空响应重试：两次尝试各记各的（第一次白花的也在账上）
+  let n = 0;
+  const flaky = await reg({ listProviders: () => [], listModels: async () => [],
+    stream: () => {
+      n += 1;
+      return n === 1
+        ? withUsage({ inputTokens: 100, outputTokens: 0 })
+        : withUsage({ inputTokens: 10, outputTokens: 50 }, "第二次成功");
+    } });
+  const b2 = (await call(flaky, "GET", "")).payload.value.usage;
+  const retried = await call(flaky, "POST", JSON.stringify({ text: "hi" }));
+  assert.equal(retried.status, 200, "第二次尝试出正文就算成功");
+  assert.equal(retried.payload.value.text, "第二次成功");
+  const f2 = retried.payload.value.usage;
+  assert.equal(f2.attempts - b2.attempts, 2, "两次尝试都记账（含第一次白花的那笔）");
+  assert.equal(f2.input - b2.input, 110, "两次尝试的输入 token 都要累计");
+  assert.equal(f2.output - b2.output, 50);
+  assert.equal(f2.requests - b2.requests, 1, "成功仍只算一次");
+}
 console.log("ok - prompt-optimizer self-test passed");

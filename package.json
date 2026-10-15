@@ -1,6 +1,6 @@
 {
   "name": "dsh-prompt-optimizer",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "在 DSH 聊天输入框右侧加一个按钮，把输入框里的口语化需求一键改写成结构化提示词。",
   "type": "module",
   "main": "lib/index.js",
