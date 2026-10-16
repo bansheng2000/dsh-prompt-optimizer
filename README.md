@@ -58,8 +58,10 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 - `输入` = 非缓存输入 token（`inputTokens`）、`输出` = 输出 token（`outputTokens`），缓存读/写单独标出，`合计` = 四项之和。
 - 输入/输出**分开写**是刻意的：两者单价常差一个数量级，合并成一个「token 数」就看不出钱花在哪。
 - `成功 N / 尝试 M`：M > N 说明有白花的调用（空响应自动重试那一次也算一次尝试）。
+- **空草稿不算尝试**：空、纯空白、以及「看不见的空白」（零宽字符 `\u200b`/`\u200c`/`\u200d`/`\u2060`/`\u200e`/`\u200f`）在客户端就被拦下，连请求都不发；宿主 `checkRequest` 也不认（直接 `400 empty`）。
 
 **范围与生命周期**：只统计**本插件自己发起的改写请求**（不含你平时的聊天），**跨重启累计**——每次改写收尾把台账写盘，下次启动读回，`since` 始终是第一笔账的时刻。
+> 第一次启用带落盘的版本时，`since` 就等于那一刻（盘上本来没账），之前旧版本只存在内存里的数字找不回来；从那以后每次重启都接着上一本账涨。
 落盘位置：`<profile>/prompt-optimizer-usage.json`（DSH 桌面端即 `~/.dsh/profiles/desktop/prompt-optimizer-usage.json`）。
 路径来自宿主发布的 `profileContext` 服务，**每个 profile 一本账**；取不到该服务的旧宿主退回 `~/.dsh/`。
 想换地方（或让多实例各记各的）就配 `rules.storeFile` 指到别的文件：

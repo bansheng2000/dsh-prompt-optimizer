@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 const TMP_DIR = join(tmpdir(), "po-usage-test-" + process.pid);
 const TMP = join(TMP_DIR, "usage.json");
 rmSync(TMP_DIR, { recursive: true, force: true });
-import { checkRequest, normalizePromptify, SYSTEM_PROMPT, userPrompt, fail } from "../lib/optimize.js";
+import { checkRequest, isBlankText, normalizePromptify, SYSTEM_PROMPT, userPrompt, fail } from "../lib/optimize.js";
 
 // --- checkRequest ---
 assert.deepEqual(checkRequest({ text: "帮我写个爬虫" }), { ok: true, text: "帮我写个爬虫" });
@@ -24,6 +24,23 @@ assert.deepEqual(
 assert.deepEqual(
   checkRequest({ text: "   \n " }),
   { ok: false, status: 400, error: { code: "empty", message: "draft is empty, nothing to optimize" } },
+);
+// 零宽字符：输入框里完全看不见，trim() 也吃不下 → 曾经真的发一次模型调用、记一次尝试。
+assert.deepEqual(
+  checkRequest({ text: "\u200b" }),
+  { ok: false, status: 400, error: { code: "empty", message: "draft is empty, nothing to optimize" } },
+);
+assert.deepEqual(
+  checkRequest({ text: "\u200b\u200c\u200d\u2060 \u200e\u200f\n" }),
+  { ok: false, status: 400, error: { code: "empty", message: "draft is empty, nothing to optimize" } },
+);
+assert.equal(isBlankText("\u200b"), true);
+assert.equal(isBlankText("\u00a0\ufeff"), true, "NBSP / BOM 也算空白（\\s 覆盖）");
+assert.equal(isBlankText("\u200b好"), false, "夹着零宽的正文不能被当成空");
+assert.deepEqual(
+  checkRequest({ text: "\u200b帮我写\u200b" }),
+  { ok: true, text: "\u200b帮我写\u200b" },
+  "零宽只影响空判定，不裁正文",
 );
 assert.deepEqual(
   checkRequest({ text: "x".repeat(20) }, 10),
@@ -458,6 +475,19 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   t = render(props);
   assert.ok(panel(t), "空草稿也开面板，让人看见为什么没结果");
   assert.match(msgOf(t).kids[0], /空的/, "空草稿要说明原因");
+}
+
+// --- 看不见的空白（零宽字符）：也不能发请求、不能记尝试 ---
+{
+  const props = { useInput: useInputOf({ draft: "\u200b \u2060", draftRev: 1 }) };
+  const before = calls.length;
+  let t = fresh(props);
+  await btn(t).onClick();
+  await flush();
+  assert.equal(calls.length - before, 0, "零宽草稿连 GET 都别额外发，更别说 POST");
+  t = render(props);
+  assert.ok(panel(t), "零宽草稿也开面板");
+  assert.match(msgOf(t).kids[0], /空的/, "零宽草稿要按空处理并说明原因");
 }
 
 // --- props 缺 inputActions：必须给提示，不能静默 ---
