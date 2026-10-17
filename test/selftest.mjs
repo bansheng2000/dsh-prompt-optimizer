@@ -692,7 +692,7 @@ for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
 const { apply } = await import("../lib/index.js");
 let route, dispose;
 apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
-  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
 assert.equal(route.kind, "exact");
 assert.equal(route.path, "/prompt-optimizer/api", "路由路径必须带前导斜杠，否则宿主 match() 匹配不到");
 
@@ -759,7 +759,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     // 真实形状：宿主 ClientSessions 没有 current()（照 dsh-api-session-controller 抄）
     sessions: {},
     webServer: { register: (r) => { r3 = r; return () => {}; } },
-  }) }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   assert.equal(r3.path, "/prompt-optimizer/api");
   const callWith = (method, body) => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -838,7 +838,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       // 没有它 resolveTarget 会返回 null → 503 no-route，根本走不到查询用量的那段
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
       webServer: { register: (x) => { r = x; return () => {}; } },
-    }) }, { rules: { storeFile: TMP, minIntervalMs: 0, ...(config?.rules ?? {}) } });
+    }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0, ...(config?.rules ?? {}) } });
     return r;
   };
   const call = (r, method, body) => new Promise((resolve) => {
@@ -862,7 +862,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(p0.cost, null, "没配单价 → cost 必须是 null，不许编造价格");
   assert.equal(p0.priceSource, null, "没配单价 → priceSource 也是 null（没有来源就没有数字）");
   assert.equal(p0.scope, "persistent", "统计范围是「跨重启累计」");
-  assert.equal(p0.store, TMP, "快照要带落盘路径，用户得知道账在哪");
+  assert.equal(p0.storeName, "usage.json", "M3：只回账本文件名，不外露绝对路径");
   assert.ok(typeof p0.since === "number" && p0.since <= Date.now(), "since = 台账起点（模块加载时刻）");
   const r1 = await call(plain, "POST", JSON.stringify({ text: "hi" }));
   assert.equal(r1.status, 200);
@@ -940,7 +940,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from("")); req.end(); } }, 0);
   });
 
-  const rebooted = await boot("?reboot=1", { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  const rebooted = await boot("?reboot=1", { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   const back = (await call2(rebooted, "GET")).payload.value.usage;
   assert.equal(back.input, saved.input, "重启后接着盘上的账继续累计，不能清零");
   assert.equal(back.attempts, saved.attempts);
@@ -949,12 +949,12 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
 
   // 没配 storeFile → 用宿主发布的 profileContext.dir（每个 profile 一本账）
   const byProfile = await boot("?reboot=2", {}, { get: (n) => (n === "profileContext" ? { dir: TMP_DIR } : undefined) });
-  assert.equal((await call2(byProfile, "GET")).payload.value.usage.store,
-    join(TMP_DIR, "prompt-optimizer-usage.json"), "默认落在 profile 目录里");
+  assert.equal((await call2(byProfile, "GET")).payload.value.usage.storeName,
+    "prompt-optimizer-usage.json", "默认落在 profile 目录里（只回文件名）");
 
   // 文件被删/损坏 → 从零开始，不许抛
   rmSync(TMP, { force: true });
-  const clean = await boot("?reboot=3", { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  const clean = await boot("?reboot=3", { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   const zero = (await call2(clean, "GET")).payload.value.usage;
   assert.equal(zero.input, 0, "账本丢了就从零开始，不影响改写");
   assert.equal(zero.scope, "persistent");
@@ -969,7 +969,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       llm: { listProviders: () => [], listModels: async () => [] },
       webServer: { register: (x) => { route = x; return () => {}; } },
     }),
-  }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
 
   const hit = (method, headers, body) => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -1026,7 +1026,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
       webServer: { register: (x) => { route = x; return () => {}; } },
     }),
-  }, { rules: { storeFile: TMP, minIntervalMs: 0 } }); // 先关掉频率闸，单独验并发闸
+  }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } }); // 先关掉频率闸，单独验并发闸
 
   const post = () => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -1118,7 +1118,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
       webServer: { register: (x) => { route = x; return () => {}; } },
     }),
-  }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   const res = await new Promise((resolve) => {
     const r = { status: 0, payload: undefined,
       writeHead(st) { this.status = st; },
@@ -1135,6 +1135,52 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.ok(!/sk-deadbeef/.test(msg), "凭据片段必须抹掉");
   assert.ok(!/@corp\.example/.test(msg), "邮箱必须抹掉");
   assert.match(msg, /<url>/);
+}
+
+// --- M3：目录 60s 缓存 + GET 不外泄账本绝对路径 ---
+{
+  let listCalls = 0;
+  let route;
+  const { apply: m3apply } = await import("../lib/index.js?m3");
+  m3apply({
+    inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm: { listProviders: () => { listCalls += 1; return [{ id: "p", name: "P" }]; },
+        listModels: async () => [{ id: "m", name: "M" }],
+        stream: () => (async function* () { yield { type: "text-delta", text: "正文" }; })() },
+      agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+      webServer: { register: (x) => { route = x; return () => {}; } },
+    }),
+  }, { rules: { storeFile: TMP, minIntervalMs: 0 } }); // 不传 catalogTtlMs → 验默认 60s
+
+  const get = () => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    route.handler({ method: "GET", url: "/prompt-optimizer/api",
+      headers: { host: "127.0.0.1:19387" }, on() {}, destroy() {} }, res);
+  });
+
+  const realNow = Date.now;
+  let fakeNow = realNow();
+  let first;
+  try {
+    Date.now = () => fakeNow;
+    first = await get();
+    assert.equal(first.status, 200);
+    assert.equal(listCalls, 1, "第一次 GET 要真的问一次目录");
+    assert.equal(first.payload.value.groups[0].models[0].id, "m");
+    await Promise.all([get(), get()]);
+    assert.equal(listCalls, 1, "60s 内（含并发）沿用缓存，不再扇出问宿主");
+    fakeNow += 61_000;
+    await get();
+    assert.equal(listCalls, 2, "过了 TTL 才重新拉");
+  } finally { Date.now = realNow; }
+
+  const usage = first.payload.value.usage;
+  assert.equal(usage.store, undefined, "响应里不许再带账本绝对路径");
+  assert.equal(usage.storeName, "usage.json", "只给文件名");
+  assert.ok(!/[\\/]/.test(usage.storeName) && usage.storeName.length > 0, "文件名不许含路径分隔符");
 }
 
 console.log("ok - prompt-optimizer self-test passed");
