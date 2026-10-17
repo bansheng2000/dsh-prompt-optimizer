@@ -465,6 +465,28 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.equal(panel(t), undefined, "再点应当收起面板");
 }
 
+// --- M4：Esc 关面板（键盘路径） ---
+{
+  const props = { useInput: useInputOf({ draft: "   ", draftRev: 1 }) };
+  let t = fresh(props);
+  assert.equal(typeof t.props.onKeyDown, "function",
+    "Esc 处理要挂在 .po-wrap 根节点上，键盘事件才能从按钮/面板冒泡上来");
+  t.props.onKeyDown({ key: "Escape", stopPropagation() {} }); // 没开面板时按 Esc：只该是无害的空操作
+  assert.equal(panel(render(props)), undefined, "没开面板时 Esc 不该凭空开面板");
+  await btn(t).onClick();
+  await flush();
+  t = render(props);
+  assert.ok(panel(t), "先有面板才谈得上关");
+  t.props.onKeyDown({ key: "a", stopPropagation() {} });
+  t = render(props);
+  assert.ok(panel(t), "只有 Esc 才关，别的键不能顺手关掉面板");
+  let stopped = 0;
+  t.props.onKeyDown({ key: "Escape", stopPropagation: () => { stopped += 1; } });
+  t = render(props);
+  assert.equal(panel(t), undefined, "Esc 应当收起面板");
+  assert.equal(stopped, 1, "Esc 要 stopPropagation，否则宿主会把 Esc 当成关输入框/取消");
+}
+
 // --- 空草稿：开面板但不发请求，且给提示 ---
 {
   const props = { useInput: useInputOf({ draft: "   ", draftRev: 1 }) };
@@ -674,6 +696,16 @@ const narrowPanel = /\.po-panel \{([^}]*)\}/.exec(narrowBody)[1];
 assert.ok(/\bbottom:\s*auto/.test(narrowPanel),
   "窄屏面板必须把 base 的 bottom:calc(100% + 6px) 显式盖成 auto，否则会和 top 一起把面板高度撑爆");
 assert.ok(!/\bbottom:\s*(?!auto)[^;]*\d/.test(narrowPanel), "窄屏面板的 bottom 只能是 auto");
+// M4：焦点可见性。按钮/下拉/操作按钮都用了 all:unset（连 UA focus 框一起抹），
+// 文本框原来在 :focus 里显式写 outline:none —— 结果纯键盘操作完全看不到焦点在哪。
+// 修法是用 :focus-visible 补回（鼠标点击不闪框，键盘/程序聚焦才出现）。
+assert.ok(!/\.po-text:focus \{[^}]*outline:\s*none/.test(bareCss), ":focus 里不许写 outline:none，焦点环会被抹掉");
+assert.match(bareCss, /\.po-text:focus-visible \{[^}]*outline:\s*2px/, "文本框要用 :focus-visible 补回焦点环");
+for (const cls of ["po-btn", "po-model", "po-act"]) {
+  assert.match(bareCss, new RegExp("\\.po-wrap \\." + cls + ":focus-visible \\{[^}]*outline:\\s*2px"),
+    "." + cls + " 用了 all:unset，必须补 :focus-visible 焦点框，否则 Tab 到它看不见焦点");
+}
+assert.ok(!/:focus-visible[^{}]*\{[^}]*outline:\s*none/.test(bareCss), "焦点框不能又被别处盖成 none");
 // token 拼错会静默失效（本项目曾连写 5 个不存在的 token）。只许用 asar 里实测存在的名字，
 // 外加本插件自己写入的 --po-shift（面板位移，clampPanel 在开面板时 setProperty）。
 const KNOWN_TOKENS = new Set([
