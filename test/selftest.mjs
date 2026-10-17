@@ -144,7 +144,12 @@ const fakeReact = {
   // 的元素就是 .po-wrap，这里直接给个假节点（含 querySelector/offsetWidth）。
   useRef: (v) => {
     const i = ui.refCur++;
-    if (!(i in ui.refs)) ui.refs[i] = { current: v === null ? wrapNode : v };
+    // 组件里第一个 null 引用就是 .po-wrap（React 在提交时填真实节点）；后面的 null 引用
+    // 拿到普通的 {current:null}——再按「null 就给 wrapNode」会让 L7 的 abort ref 拿到假 DOM。
+    if (!(i in ui.refs)) {
+      if (v === null && !ui.wrapGiven) { ui.wrapGiven = true; ui.refs[i] = { current: wrapNode }; }
+      else ui.refs[i] = { current: v };
+    }
     return ui.refs[i];
   },
   useCallback: (fn) => fn,
@@ -164,6 +169,10 @@ let fakeNow = 1_700_000_000_000;
 class FakeDate extends RealDate {
   constructor(...args) { super(...(args.length > 0 ? args : [fakeNow])); }
   static now() { return fakeNow; }
+}
+class FakeAbortController {
+  constructor() { this.signal = { aborted: false }; }
+  abort() { this.signal.aborted = true; }
 }
 // 每次调用 = 一次页面加载：client.js 里的目录缓存是模块级状态，重新挂一次就回到
 // 「本页还没拉过目录」。第一个挂载同时做契约断言（模块 id / 只向宿主要 react / inject 槽）。
@@ -187,6 +196,9 @@ function mountClient() {
     },
     URL,
     Date: FakeDate,
+    // 新 context 只有 ECMAScript 内建对象，没有 web 平台对象：AbortController 得自己给
+    // （真机渲染进程是浏览器环境，本来就有）。
+    AbortController: FakeAbortController,
     console,
     clearTimeout: () => {},
     setTimeout: () => 0,
@@ -245,6 +257,7 @@ const fresh = (props = INPUT, m = mounted) => {
   ui.effectCur = 0;
   ui.s.length = 0;
   ui.refs.length = 0;
+  ui.wrapGiven = false; // 假 useRef 的「第一个 null 引用 = .po-wrap」是每场景一次的判定
   calls.length = 0;
   return render(props, m);
 };
@@ -1254,6 +1267,41 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(usage.store, undefined, "响应里不许再带账本绝对路径");
   assert.equal(usage.storeName, "usage.json", "只给文件名");
   assert.ok(!/[\\/]/.test(usage.storeName) && usage.storeName.length > 0, "文件名不许含路径分隔符");
+}
+
+// --- L6：两侧的「不可见字符」字符类必须逐字一致 ---
+// 「看起来是空白」在客户端（INVISIBLE_RE）和宿主（isBlankText）各有一份手抄常量：
+// 一边补了新的零宽字符、另一边没跟，就会出现「按钮发了请求、宿主回 empty」这种半吊子行为。
+// 直接把两份源码里的字符类抠出来比对，谁改漏谁红。
+{
+  const hostSrc = await readFile(new URL("../lib/optimize.js", import.meta.url), "utf8");
+  const classesIn = (src) => [...new Set([...src.matchAll(/\[[^\]\n]*\\u200b[^\]\n]*\]/g)].map((m) => m[0]))];
+  const hostClasses = classesIn(hostSrc);
+  const clientClasses = classesIn(clientSrc);
+  assert.ok(hostClasses.length > 0, "宿主侧要能找到零宽字符类");
+  assert.ok(clientClasses.length > 0, "客户端侧要能找到零宽字符类");
+  assert.deepEqual(clientClasses, hostClasses, "L6：两侧的不可见字符类必须一致");
+}
+
+// --- L7：卸载要取消在途请求 ---
+{
+  let seen = null;
+  let land = null;
+  sandbox.fetch = (url, init) => {
+    // 只截 POST：点开面板会先 fire-and-forget 拉一次目录（GET），那个不参与本用例。
+    if (init?.method === "POST") seen = init?.signal;
+    return new Promise((_, reject) => { land = reject; });
+  };
+  const t = fresh(INPUT);
+  const pending = btn(t).onClick(); // 故意不 await：让 POST 挂在 fetch 里
+  await flush();
+  assert.ok(seen, "L7：POST 必须带 AbortSignal（不带就无从取消）");
+  assert.equal(seen.aborted, false, "没卸载就不该提前取消");
+  for (const e of ui.effects) if (e && typeof e.cleanup === "function") e.cleanup(); // 模拟卸载
+  assert.equal(seen.aborted, true, "L7：组件卸载要掐掉在途请求");
+  land?.(new Error("aborted")); // 让挂着的 promise 落地，别留悬空 rejection
+  await pending.catch(() => {});
+  sandbox.fetch = fakeFetch;
 }
 
 console.log("ok - prompt-optimizer self-test passed");
