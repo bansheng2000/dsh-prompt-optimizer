@@ -1092,4 +1092,49 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(used.attempts, used.requests, "被 429 挡下的尝试不许记账（只有成功那次算）");
 }
 
+// --- M2：上游错误原文不许原样回显（可能带 provider URL、账号、整段上游 JSON）---
+{
+  const { redactMessage } = await import("../lib/optimize.js");
+  assert.equal(redactMessage("plain failure"), "plain failure", "普通短句原样保留，别把可读性也抹掉");
+  assert.equal(redactMessage("connect ECONNREFUSED https://api.internal.example/v1/chat?x=1"),
+    "connect ECONNREFUSED <url>", "URL 抹成 <url>");
+  assert.equal(redactMessage("401 from ly1257615064@gmail.com"), "401 from <email>", "邮箱抹成 <email>");
+  assert.match(redactMessage("upstream said token=sk-abcdef1234567890"), /token=<redacted>/);
+  assert.match(redactMessage('{"error":{"message":"invalid api_key=ABCDEF0123456789"}}'), /api_key=<redacted>/);
+  const long = redactMessage("x".repeat(500));
+  assert.equal(long.length, 201, "超长截断到 200 + 省略号");
+  assert.ok(long.endsWith("…"));
+
+  // 集成：宿主以前把上游原文整段透出去（谁读到 message 就拿到 URL/凭据）→ 现在必须是抹过的
+  let route;
+  const { apply: m2apply } = await import("../lib/index.js?m2");
+  m2apply({
+    inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm: { listProviders: () => [], listModels: async () => [],
+        stream: () => (async function* () {
+          throw new Error("fetch failed https://api.secret.example/v1?token=sk-deadbeef123456 user@corp.example");
+        })() },
+      agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+      webServer: { register: (x) => { route = x; return () => {}; } },
+    }),
+  }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
+  const res = await new Promise((resolve) => {
+    const r = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method: "POST", url: "/prompt-optimizer/api",
+      headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route.handler(req, r).catch((e) => resolve({ status: 500, payload: { error: { message: String(e) } } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(JSON.stringify({ text: "hi" }))); req.end(); } }, 0);
+  });
+  assert.equal(res.status, 502, "上游抛错要落到 502 分支");
+  const msg = res.payload.error.message;
+  assert.ok(!/https?:\/\//.test(msg), "不许把 provider URL 回给面板");
+  assert.ok(!/sk-deadbeef/.test(msg), "凭据片段必须抹掉");
+  assert.ok(!/@corp\.example/.test(msg), "邮箱必须抹掉");
+  assert.match(msg, /<url>/);
+}
+
 console.log("ok - prompt-optimizer self-test passed");
