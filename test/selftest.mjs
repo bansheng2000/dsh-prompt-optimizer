@@ -904,6 +904,10 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(p1.attempts - p0.attempts, 1, "一次尝试记一次");
   assert.equal(p1.requests - p0.requests, 1, "成功返回正文记一次 requests");
   assert.equal(p1.failed - p0.failed, 0);
+  // L1：落盘改成异步之后，语义必须保持「响应发出时账已经写好」——响应到手立刻读文件核对。
+  // 谁把它改成 fire-and-forget（或漏了 await），这一条会先红。
+  assert.equal(JSON.parse(readFileSync(TMP, "utf8")).requests, p1.requests,
+    "L1：响应发出时台账必须已落盘（异步写也要 await 完再回）");
   assert.equal(p1.total, p1.input + p1.output + p1.cacheRead + p1.cacheWrite, "合计 = 输入+输出+缓存读+缓存写");
   const g1 = (await call(plain, "GET", "")).payload.value.usage;
   assert.ok(g1.total >= p1.total, "GET 也回带同一本账（人工核对通道）");
