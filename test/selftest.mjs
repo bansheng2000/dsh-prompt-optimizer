@@ -702,7 +702,7 @@ function call(method, url, body) {
     const res = { status: 0, payload: undefined,
       writeHead(status) { this.status = status; },
       end(text) { this.payload = JSON.parse(text); resolve(this); } };
-    const req = { method, url, headers: { host: "127.0.0.1:19387" },
+    const req = { method, url, headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
       on(ev, fn) { this[ev] = fn; }, destroy() {} };
     route.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
     // handler 是 async；只有走到 readJson 的请求才注册 data/end 监听器，
@@ -765,7 +765,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     const res = { status: 0, payload: undefined,
       writeHead(st) { this.status = st; },
       end(t) { this.payload = JSON.parse(t); resolve(this); } };
-    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
       on(ev, fn) { this[ev] = fn; }, destroy() {} };
     r3.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
     setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
@@ -845,7 +845,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     const res = { status: 0, payload: undefined,
       writeHead(st) { this.status = st; },
       end(t2) { this.payload = JSON.parse(t2); resolve(this); } };
-    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
       on(ev2, fn) { this[ev2] = fn; }, destroy() {} };
     r.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
     setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
@@ -934,7 +934,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     const res = { status: 0, payload: undefined,
       writeHead(st) { this.status = st; },
       end(t2) { this.payload = JSON.parse(t2); resolve(this); } };
-    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" },
+    const req = { method, url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
       on(ev2, fn) { this[ev2] = fn; }, destroy() {} };
     r.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
     setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from("")); req.end(); } }, 0);
@@ -959,4 +959,50 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(zero.input, 0, "账本丢了就从零开始，不影响改写");
   assert.equal(zero.scope, "persistent");
 }
+// --- H1：路由自己判来源（宿主鉴权墙管不到插件自注册的路由）---
+{
+  let route;
+  const { apply: h1apply } = await import("../lib/index.js?h1");
+  h1apply({
+    inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm: { listProviders: () => [], listModels: async () => [] },
+      webServer: { register: (x) => { route = x; return () => {}; } },
+    }),
+  }, { rules: { storeFile: TMP } });
+
+  const hit = (method, headers, body) => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method, url: "/prompt-optimizer/api", headers, on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    if (body !== undefined) setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
+  });
+  const SELF = { host: "127.0.0.1:19387" };
+  const json = { "content-type": "application/json" };
+
+  // 跨站 Origin → 403，且不许进到业务逻辑（这里故意连 body 都不发）
+  const evil = await hit("POST", { ...SELF, origin: "https://evil.example", ...json });
+  assert.equal(evil.status, 403, "跨站 Origin 必须被拒");
+  assert.equal(evil.payload.error.code, "origin");
+  assert.equal((await hit("GET", { ...SELF, origin: "https://evil.example" })).status, 403, "GET 一样要挡");
+  assert.equal((await hit("GET", { ...SELF, origin: "null" })).status, 403, "Origin: null（file:// / 沙箱 iframe）算跨站");
+
+  // no-cors 简单请求（text/plain）的最后一道闸：即使 Origin 被绕过，非 JSON 也不处理
+  const noJson = await hit("POST", { ...SELF, "content-type": "text/plain;charset=UTF-8" }, JSON.stringify({ text: "hi" }));
+  assert.equal(noJson.status, 415, "POST 只收 application/json");
+  assert.equal(noJson.payload.error.code, "content-type");
+
+  // 正常路径不许被误伤：同源 Origin、无 Origin、隧道 https 形态都要走到业务校验（空文本 → 400 empty）
+  const sameOrigin = await hit("POST", { ...SELF, origin: "http://127.0.0.1:19387", ...json }, JSON.stringify({ text: " " }));
+  assert.equal(sameOrigin.status, 400);
+  assert.equal(sameOrigin.payload.error.code, "empty");
+  const noOrigin = await hit("POST", { ...SELF, ...json }, JSON.stringify({ text: " " }));
+  assert.equal(noOrigin.payload.error.code, "empty", "curl / 本机工具不带 Origin，要放行");
+  const tunnel = await hit("POST", { host: "x.trycloudflare.com", origin: "https://x.trycloudflare.com", ...json }, JSON.stringify({ text: " " }));
+  assert.equal(tunnel.payload.error.code, "empty", "经隧道以 https 访问（Origin 与 Host 同源）同样放行");
+  assert.equal((await hit("GET", { ...SELF })).status, 200, "无 Origin 的 GET 照常回目录+台账");
+}
+
 console.log("ok - prompt-optimizer self-test passed");
