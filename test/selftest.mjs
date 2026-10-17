@@ -1,7 +1,7 @@
 // 自测：不连宿主，只验纯逻辑 + insertText 的冲突分支语义（照宿主复刻的最小形状）。
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -47,6 +47,10 @@ assert.deepEqual(
   { ok: false, status: 413, error: { code: "too-long", message: "draft is 20 chars, limit 10" } },
 );
 assert.equal(checkRequest({ text: "ok".repeat(5) }, 100).ok, true);
+// L3：回的是 trim 后的原文；长度按码点算（emoji 是 1 个字符，不是 UTF-16 的 2 个）
+assert.deepEqual(checkRequest({ text: "  帮我写个爬虫  " }), { ok: true, text: "帮我写个爬虫" }, "首尾空白不进正文");
+assert.equal(checkRequest({ text: "😀".repeat(10) }, 10).ok, true, "10 个 emoji 是 10 个字符，不该被判超长");
+assert.equal(checkRequest({ text: "😀".repeat(11) }, 10).error.message, "draft is 11 chars, limit 10");
 
 // --- normalizePromptify：剥围栏 + 剥空白 ---
 assert.equal(normalizePromptify(42), "");
@@ -748,6 +752,11 @@ assert.equal(okRoute.payload.error.code, "no-llm");
 const badText = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: 42 }));
 assert.equal(badText.status, 400);
 assert.equal(badText.payload.error.code, "bad-text");
+// L2：超大 body 以前是 req.destroy() 当解析失败处理 —— 客户端拿到的是断连 + 400 bad-json。
+// 现在要如实回 413，而且不该把超限的字节继续堆在内存里。
+const huge = await call("POST", "/prompt-optimizer/api", JSON.stringify({ text: "x".repeat(2_100_000) }));
+assert.equal(huge.status, 413, "超过 2MB 的请求体要回 413，而不是悄悄断连");
+assert.equal(huge.payload.error.code, "too-large");
 const wrongMethod = await call("DELETE", "/prompt-optimizer/api", "");
 assert.equal(wrongMethod.status, 405, "只有 GET/POST 合法");
 // GET 是模型目录：llm 不可用时也要返回可解析的空目录，而不是崩掉。
@@ -994,6 +1003,16 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   const zero = (await call2(clean, "GET")).payload.value.usage;
   assert.equal(zero.input, 0, "账本丢了就从零开始，不影响改写");
   assert.equal(zero.scope, "persistent");
+
+  // L4：账本被手改/截断成离谱数值时，面板不能跟着变成噪声
+  const badFile = join(TMP_DIR, "bad-usage.json");
+  writeFileSync(badFile, JSON.stringify({ input: 1e308, output: -5, requests: 3, since: 1e308 }));
+  const bad = await boot("?reboot=4", { rules: { storeFile: badFile, minIntervalMs: 0, catalogTtlMs: 0 } });
+  const fixed = (await call2(bad, "GET")).payload.value.usage;
+  assert.ok(Number.isFinite(fixed.input) && fixed.input <= 1e15, "L4：超大计数要夹上限，不能把 1e308 显示出来");
+  assert.equal(fixed.output, 0, "L4：负数一律归零");
+  assert.equal(fixed.requests, 3, "L4：合法的值仍要照原样读回来");
+  assert.ok(fixed.since <= Date.now(), "L4：since 不能是未来的时间戳");
 }
 // --- H1：路由自己判来源（宿主鉴权墙管不到插件自注册的路由）---
 {
