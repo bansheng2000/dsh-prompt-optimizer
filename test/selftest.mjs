@@ -692,7 +692,7 @@ for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
 const { apply } = await import("../lib/index.js");
 let route, dispose;
 apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
-  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP } });
+  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
 assert.equal(route.kind, "exact");
 assert.equal(route.path, "/prompt-optimizer/api", "路由路径必须带前导斜杠，否则宿主 match() 匹配不到");
 
@@ -759,7 +759,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     // 真实形状：宿主 ClientSessions 没有 current()（照 dsh-api-session-controller 抄）
     sessions: {},
     webServer: { register: (r) => { r3 = r; return () => {}; } },
-  }) }, { rules: { storeFile: TMP } });
+  }) }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
   assert.equal(r3.path, "/prompt-optimizer/api");
   const callWith = (method, body) => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -838,7 +838,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       // 没有它 resolveTarget 会返回 null → 503 no-route，根本走不到查询用量的那段
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
       webServer: { register: (x) => { r = x; return () => {}; } },
-    }) }, { rules: { storeFile: TMP, ...(config?.rules ?? {}) } });
+    }) }, { rules: { storeFile: TMP, minIntervalMs: 0, ...(config?.rules ?? {}) } });
     return r;
   };
   const call = (r, method, body) => new Promise((resolve) => {
@@ -940,7 +940,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from("")); req.end(); } }, 0);
   });
 
-  const rebooted = await boot("?reboot=1", { rules: { storeFile: TMP } });
+  const rebooted = await boot("?reboot=1", { rules: { storeFile: TMP, minIntervalMs: 0 } });
   const back = (await call2(rebooted, "GET")).payload.value.usage;
   assert.equal(back.input, saved.input, "重启后接着盘上的账继续累计，不能清零");
   assert.equal(back.attempts, saved.attempts);
@@ -954,7 +954,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
 
   // 文件被删/损坏 → 从零开始，不许抛
   rmSync(TMP, { force: true });
-  const clean = await boot("?reboot=3", { rules: { storeFile: TMP } });
+  const clean = await boot("?reboot=3", { rules: { storeFile: TMP, minIntervalMs: 0 } });
   const zero = (await call2(clean, "GET")).payload.value.usage;
   assert.equal(zero.input, 0, "账本丢了就从零开始，不影响改写");
   assert.equal(zero.scope, "persistent");
@@ -969,7 +969,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       llm: { listProviders: () => [], listModels: async () => [] },
       webServer: { register: (x) => { route = x; return () => {}; } },
     }),
-  }, { rules: { storeFile: TMP } });
+  }, { rules: { storeFile: TMP, minIntervalMs: 0 } });
 
   const hit = (method, headers, body) => new Promise((resolve) => {
     const res = { status: 0, payload: undefined,
@@ -1003,6 +1003,93 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   const tunnel = await hit("POST", { host: "x.trycloudflare.com", origin: "https://x.trycloudflare.com", ...json }, JSON.stringify({ text: " " }));
   assert.equal(tunnel.payload.error.code, "empty", "经隧道以 https 访问（Origin 与 Host 同源）同样放行");
   assert.equal((await hit("GET", { ...SELF })).status, 200, "无 Origin 的 GET 照常回目录+台账");
+}
+
+// --- M1：并发/频率上限（这条路由本机任意进程都能直接打）---
+{
+  // 停在模型调用里，制造一个可控的并发窗口
+  let route;
+  const gates = [];
+  let calls = 0;
+  const { apply: m1a } = await import("../lib/index.js?m1a");
+  m1a({
+    inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm: {
+        listProviders: () => [], listModels: async () => [],
+        stream: () => (async function* () {
+          calls += 1;
+          await new Promise((r) => gates.push(r));
+          yield { type: "text-delta", text: "正文" };
+        })(),
+      },
+      agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+      webServer: { register: (x) => { route = x; return () => {}; } },
+    }),
+  }, { rules: { storeFile: TMP, minIntervalMs: 0 } }); // 先关掉频率闸，单独验并发闸
+
+  const post = () => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method: "POST", url: "/prompt-optimizer/api",
+      headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(JSON.stringify({ text: "hi" }))); req.end(); } }, 0);
+  });
+
+  const first = post();
+  const second = post();
+  for (let i = 0; i < 100 && gates.length < 2; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.equal(gates.length, 2, "前两条改写应该都已经占住并发额度");
+  const third = await post();
+  assert.equal(third.status, 429, "超额并发必须挡在模型调用之前");
+  assert.equal(third.payload.error.code, "busy");
+  assert.equal(calls, 2, "被拒的那条没资格调模型");
+  gates.splice(0).forEach((r) => r());
+  const [ra, rb] = await Promise.all([first, second]);
+  assert.equal(ra.status, 200);
+  assert.equal(rb.status, 200, "放行的那两条要能正常出结果");
+
+  // 频率闸：默认 800ms 内第二次点击回 429（人手点不出来，脚本可以）
+  let route2;
+  const { apply: m1b } = await import("../lib/index.js?m1b");
+  m1b({
+    inject: (deps, fn) => fn({
+      effect: (f) => { f(); },
+      llm: { listProviders: () => [], listModels: async () => [],
+        stream: () => (async function* () { yield { type: "text-delta", text: "正文" }; })() },
+      agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
+      webServer: { register: (x) => { route2 = x; return () => {}; } },
+    }),
+  }, { rules: { storeFile: TMP } }); // 不传 minIntervalMs → 用默认 800
+  const post2 = () => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method: "POST", url: "/prompt-optimizer/api",
+      headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route2.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: String(e) } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(JSON.stringify({ text: "hi" }))); req.end(); } }, 0);
+  });
+  const a1 = await post2();
+  assert.equal(a1.status, 200);
+  const a2 = await post2();
+  assert.equal(a2.status, 429, "800ms 内的第二次起手要被频率闸挡住");
+  assert.equal(a2.payload.error.code, "busy");
+  assert.equal((await post2()).status, 429, "连续第三次仍然是 429，不会因为第二次被拒就放行");
+  // 429 不许进账本：被闸门挡下的请求根本没花额度
+  const used = (await (async () => {
+    const res = { status: 0, payload: undefined, writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve0(this); } };
+    let resolve0;
+    const p = new Promise((r) => { resolve0 = r; });
+    route2.handler({ method: "GET", url: "/prompt-optimizer/api", headers: { host: "127.0.0.1:19387" }, on() {}, destroy() {} }, res);
+    return p;
+  })()).payload.value.usage;
+  assert.equal(used.attempts, used.requests, "被 429 挡下的尝试不许记账（只有成功那次算）");
 }
 
 console.log("ok - prompt-optimizer self-test passed");
