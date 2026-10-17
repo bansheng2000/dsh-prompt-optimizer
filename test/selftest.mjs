@@ -310,6 +310,7 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.equal(post.length, 1, "点一次发一次 POST");
   assert.equal(post[0].body.text, "帮我写个爬虫", "请求体必须带当前草稿");
   assert.equal("model" in post[0].body, false, "默认跟随会话模型，请求体不该带 model");
+  assert.equal("sessionId" in post[0].body, false, "L8：宿主没给会话 id 就不带这个字段（由宿主回落）");
   assert.ok(calls.some((c) => c.method === "GET"), "还要拉一次模型目录");
   const ta = panel(t).kids.find((k) => k && k.type === "textarea");
   assert.ok(ta, "面板里得有可编辑文本框（用户要的「聊天框」）");
@@ -1240,8 +1241,8 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   }, { rules: { storeFile: TMP, minIntervalMs: 0 } }); // 不传 catalogTtlMs → 验默认 60s
 
   const get = () => new Promise((resolve) => {
-    const res = { status: 0, payload: undefined,
-      writeHead(st) { this.status = st; },
+    const res = { status: 0, payload: undefined, headers: null,
+      writeHead(st, h) { this.status = st; this.headers = h; },
       end(t) { this.payload = JSON.parse(t); resolve(this); } };
     route.handler({ method: "GET", url: "/prompt-optimizer/api",
       headers: { host: "127.0.0.1:19387" }, on() {}, destroy() {} }, res);
@@ -1254,6 +1255,8 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     Date.now = () => fakeNow;
     first = await get();
     assert.equal(first.status, 200);
+    // L9：这个 GET 会回带台账（token/费用），不许被浏览器/中间代理缓存住
+    assert.equal(first.headers["cache-control"], "no-store", "L9：GET 响应要 no-store");
     assert.equal(listCalls, 1, "第一次 GET 要真的问一次目录");
     assert.equal(first.payload.value.groups[0].models[0].id, "m");
     await Promise.all([get(), get()]);
