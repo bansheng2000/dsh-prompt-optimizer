@@ -157,6 +157,14 @@ const fakeDocument = {
   head: { appendChild() {} },
 };
 const sandbox = { fetch: fakeFetch }; // 可换 fetch，用来模拟慢请求
+// 可控时钟（L5）：client.js 的目录缓存带 60s TTL，测试不可能真等一分钟。
+// 只覆盖 Date.now / 无参 new Date，其余（new Date(ms)）照常工作。
+const RealDate = Date;
+let fakeNow = 1_700_000_000_000;
+class FakeDate extends RealDate {
+  constructor(...args) { super(...(args.length > 0 ? args : [fakeNow])); }
+  static now() { return fakeNow; }
+}
 // 每次调用 = 一次页面加载：client.js 里的目录缓存是模块级状态，重新挂一次就回到
 // 「本页还没拉过目录」。第一个挂载同时做契约断言（模块 id / 只向宿主要 react / inject 槽）。
 function mountClient() {
@@ -178,6 +186,7 @@ function mountClient() {
       head: { appendChild() {} },
     },
     URL,
+    Date: FakeDate,
     console,
     clearTimeout: () => {},
     setTimeout: () => 0,
@@ -306,6 +315,15 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   await flush();
   t = render(INPUT);
   assert.equal(calls.filter((c) => c.method === "GET").length, getsBefore, "目录是缓存的，同一页面不该反复拉");
+  // L5：缓存要过期。没有 TTL 的话，改完配置/新装 provider 得刷新整个页面才看得见新模型。
+  fakeNow += 61_000;
+  await btn(t).onClick(); // 收起
+  await flush();
+  t = render(INPUT);
+  await btn(t).onClick(); // 过了 TTL 再打开
+  await flush();
+  t = render(INPUT);
+  assert.equal(calls.filter((c) => c.method === "GET").length, getsBefore + 1, "L5：过了 60s TTL 要重新拉目录");
     const sel = deepFind(panel(t), (k) => k.type === "select");
   assert.ok(sel.kids.length > 1, "再打开时模型列表应立刻在，不用等网络");
 }
