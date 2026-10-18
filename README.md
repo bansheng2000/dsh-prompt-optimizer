@@ -27,6 +27,8 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 
 宿主条目 `prompt-optimizer` 由包内 `cordis.patch.yml`（`- insert:` 形态）自动注册，不需要手写宿主配置。装完输入框右侧就有图标按钮。
 
+兼容范围写在本包 `peerDependencies` 的 `@deepseek-ai/dsh-*` 区间（`^0.1.7-rc.1 || ^0.2.0-rc.1`），已在 DSH **0.2.0-rc.2** 与 **0.2.1-rc.2** 实测：宿主路由在线、客户端面板可用、台账跨更新累计不清零。
+
 本地开发：profile 的 `node_modules` 是**真实拷贝不是 symlink**，改完仓库里的 `lib/*.js` 必须重新跑 `pnpm install` 或手工 `Copy-Item` 到 profile 才生效。改宿主侧 `lib/index.js` 还要重启 DSH（客户端 bundle 刷新页面即可）。
 
 ## 配置
@@ -111,3 +113,5 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 - 客户端 hook 只能在渲染期调用：`props.useInput` 是宿主 `materializeStandardBinding` 生成的 React selector hook（`useSyncExternalStoreWithSelector`），写进 `onClick`/`async` 回调会抛 hook 规则错误并被未处理 rejection 吞掉，表现为「点了没反应」。
 - 窄屏不能按图标对齐面板：宿主在 `<=640px` 会重排输入框那一行，图标可能落到屏幕最左，`absolute + right:0` 的面板必然出屏。用 `position:fixed` + `left/right` 双向锚定贴视口，并显式把 base 的 `bottom` 盖成 `auto`。
 - **桌面端面板出屏**：面板 `right: 0` 贴图标往左展开 420px，图标离视口左边不够一整面板宽时整块出屏（左侧栏一开必现）。解法是 `transform: translateX(var(--po-shift, 0px))` + 开面板时按锚点**右缘**算左溢出：`8 + panel.offsetWidth - wrap.getBoundingClientRect().right`。两条细节：清零必须 `removeProperty`（赋空串会让 `var()` 解析失败，整条 `transform` 变 invalid）；算溢出必须用锚点**右缘**（`right:0` 时面板左缘 = 锚点右缘 - 面板宽，用 `left` 算会整块偏一个面板宽）。窄屏 `@media` 里补 `transform: none`。
+- **DSH 版本闸门（0.2.1-rc.2 起）**：`@deepseek-ai/dsh-app-boot` 的 `unmetRequirements()` 先看 manifest **顶层** `engines.dsh`——存在就**只**按它裁决、peerDependencies 完全忽略；不存在才逐个校验 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 的 peer 区间（`semver.satisfies(runtime, range, { includePrerelease: true })`）。不满足 → `evaluatePluginCompatibility` 出 issue → 该 bundle 启动期整层跳过（不崩、不动数据，表现为插件静默消失，只能靠豁免放行）。写在 `dsh.engines.dsh` 下的区间**不被这个闸门消费**，`dsh.compatibility.dshReleases` 也无人消费（本包已把这两处死元数据从 manifest 移除，只留 peer 区间）。
+- **peer 区间要写全**：`^0.1.7-rc.1 || ^0.2.0-rc.1` 覆盖 0.1.7 与整个 0.2.x 线；只写 `^0.1.7-rc.1` 会在用户升级 DSH 后 fail-closed、插件静默消失（预发布版靠 `includePrerelease: true` 参与判定）。
