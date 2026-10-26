@@ -2,3 +2,4 @@
 node_modules/
 # layout probe output: 20 PNGs per run, regenerate with test/cdp-probe.mjs
 test/shots/
+.dsh-ops/

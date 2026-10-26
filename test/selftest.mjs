@@ -95,8 +95,6 @@ let catalogBroken = false; // 让 GET 目录失败，验证下拉框挂了也不
 let settingsModel = null;
 const SETTINGS_PATH = "/prompt-optimizer/settings";
 const fakeFetch = async (url, init) => {
-  // 自检探针不计入「发了哪些请求」的断言
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
   const method = init?.method ?? "GET";
   calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
   if (String(url).endsWith(SETTINGS_PATH)) {
@@ -625,7 +623,6 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   const realFetch = fetch;
   void realFetch;
   const slowFetch = async (url, init) => {
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
     if ((init?.method ?? "GET") === "POST") {
       calls.push({ method: "POST", url: String(url), body: JSON.parse(init.body) });
       await hold;
@@ -649,7 +646,6 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
 // --- 失败提示不能被「生成中」的清理顺手抹掉 ---
 {
   sandbox.fetch = async (url, init) => {
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
     if ((init?.method ?? "GET") === "POST") {
       calls.push({ method: "POST", url: String(url) });
       return { status: 503, json: async () => ({ ok: false, error: { message: "模型不可用" } }) };
@@ -669,7 +665,6 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
     requests: 1, attempts: 2, failed: 0, since: 1700000000000, scope: "process",
     price: null, priceSource: null, cost: null };
   sandbox.fetch = async (url, init) => {
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
     const method = init?.method ?? "GET";
     calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
     if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, usage: host } }) };
@@ -1327,7 +1322,6 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   let seen = null;
   let land = null;
   sandbox.fetch = (url, init) => {
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
     // 只截 POST：点开面板会先 fire-and-forget 拉一次目录（GET），那个不参与本用例。
     if (init?.method === "POST") seen = init?.signal;
     return new Promise((_, reject) => { land = reject; });
@@ -1392,7 +1386,6 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   // 保存失败要看得见（不许静默）
   const goodFetch = sandbox.fetch;
   sandbox.fetch = async (url, init) => {
-  if (String(url).endsWith("/prompt-optimizer/probe")) return { status: 200, json: async () => ({ ok: true }) };
     if (String(url).endsWith(SETTINGS_PATH) && (init?.method ?? "GET") === "POST") {
       return { status: 500, json: async () => ({ ok: false, error: { message: "写不进去" } }) };
     }
