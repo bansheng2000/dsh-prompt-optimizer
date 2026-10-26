@@ -1442,6 +1442,41 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
 }
 
+// --- 真实目录形状：model id 自带斜杠（opencode/xxx）、全局设置存的就是这种 id ---
+// 用户真机报「只有跟随会话模型」时，先排除「斜杠把 provider/model 切开」这类塌陷。
+{
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+  const savedGroups = CATALOG.value.groups;
+  CATALOG.value.groups = [
+    { id: "deepseek-account", name: "DeepSeek Account", models: [
+      { id: "deepseek-flash", name: "DeepSeek-V4.1-Flash" },
+      { id: "deepseek-v4-pro", name: "DeepSeek-V4-Pro" },
+    ] },
+    { id: "opencode-bridge", name: "OpenCode 免费模型", models: [
+      { id: "opencode/beam-free", name: "Beam Free" },
+      { id: "opencode/glm-5.3-flash-free", name: "GLM-5.3-Flash Free" },
+      { id: "opencode/nemotron-3-ultra-free", name: "Nemotron 3 Ultra Free" },
+    ] },
+  ];
+  settingsModel = { provider: "opencode-bridge", model: "opencode/glm-5.3-flash-free" };
+  const page = await mountClient();
+  const t0 = fresh(INPUT, page);
+  await btn(t0).onClick();
+  await flush(); await flush(); await flush();
+  const sel = deepFind(panel(render(INPUT, page)), (k) => k && k.type === "select");
+  const opts = sel.kids.filter((k) => k && k.type === "option");
+  assert.equal(opts.length, 6, "跟随 + 5 个模型都要在（id 含斜杠也不能塌成一项）");
+  assert.equal(sel.props.value, "opencode-bridge/opencode/glm-5.3-flash-free", "含斜杠的 model id 也要对得上选中项");
+  const post = calls.filter((c) => c.method === "POST" && !c.url.endsWith(SETTINGS_PATH)).at(-1);
+  assert.deepEqual(post.body.model, { provider: "opencode-bridge", model: "opencode/glm-5.3-flash-free" },
+    "斜杠 id 传给宿主时必须原样拆成 provider + model");
+  sel.props.onChange({ target: { value: "opencode-bridge/opencode/nemotron-3-ultra-free" } });
+  assert.equal(sharedStorage.getItem("po.model.default"), "opencode-bridge/opencode/nemotron-3-ultra-free");
+  CATALOG.value.groups = savedGroups;
+  settingsModel = null;
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+}
+
 // --- 全局模型设置（宿主）：读写 + 优先级「聊天页 > 全局 > 会话」---
 {
   const settingsFile = join(TMP_DIR, "pref-model.json");
