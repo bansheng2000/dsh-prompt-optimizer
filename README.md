@@ -7,7 +7,7 @@
 输入框右侧多一个图标按钮（`conversation.input.right` slot，order 50）。图标是名侦探柯南主题横幅（源图 2500×1677，3:2），缩到 40px 高 → 以 data URI 内联进 `lib/client.js`（client bundle 没有静态文件服务）。CSS 只锁高度、宽度自适应，换源图也不会被压变形。
 
 - 点它 → 读当前草稿 → POST 宿主路由改写 → **面板弹出**，文本框里就是改写结果。
-- 面板右上角下拉框选模型，首项「跟随会话模型」即默认（跟随会话当前 provider/model）。
+- 面板右上角下拉框选模型，首项「跟随会话模型」即默认（跟随会话当前 provider/model）。**聊天页里的选择优先于插件详情页的全局设置，并在该页内保持不变**（见下文「模型设置」）。
 - 文本框随便改；「重新生成」按**当下草稿**再跑一遍（不是拿面板里的旧文本）。
 - 「用这条」把文本框内容写回输入框，然后收起面板。
 - 空草稿：面板照弹（让人看见为什么没结果），不发请求，红字说明原因。
@@ -41,8 +41,19 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 | `timeoutMs` | 60000 | 单次改写超时 |
 | `maxTokens` | 4096 | 单次输出预算（推理模型会先把预算花在 reasoning 上，别往下调） |
 | `price` | 不设 | 单价，用来算费用；格式见下文「用量统计」。**不设就只显示 token** |
+| `modelFile` | 不设 | 全局模型设置文件；不设即 `<profile>/prompt-optimizer-model.json` |
 
-模型选择**不持久化**——每次开面板跟随会话模型，选了别的只对本次生效。这是刻意的：持久化要另接 settings 桥，目前没这个需求。
+## 模型设置
+
+两级，优先级从高到低：
+
+1. **聊天页里的选择**（面板右上角下拉框）——本页内一律以它为准；刷新/重开面板都记得（按会话记在 `sessionStorage`）。
+2. **插件详情页的「模型」设置**（全局）——只决定「本页还没选过」时用哪个模型，默认「跟随会话模型」。
+3. 会话当前模型——上面两处都是「跟随会话模型」时才用它。
+
+- 详情页设置：插件页 → 本插件那一行的 **配置** → 「改写用模型」，**选中即保存**，落盘 `<profile>/prompt-optimizer-model.json`（`rules.modelFile` 可换位置），重启 DSH 不丢。
+- 默认值是「跟随会话模型」——什么都不配时，行为与以前完全一致。
+- 三态协议（`POST /prompt-optimizer/api`）：带 `model: {provider, model}` = 用这个；带 `follow: true` = 一定跟随会话（**不许**被全局设置兜底，这是「页内为准」的保证）；两者都没有（老客户端 / curl）= 全局设置兜底，再回落会话模型。
 
 ## 用量统计
 
@@ -96,8 +107,8 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 **核对**：`GET /prompt-optimizer/api` 会连台账一起返回（`value.usage`），可拿来跟界面上那行对照。
 
 ## 文件
-- `lib/index.js` — 宿主侧：`kind: "exact"` 路由 `/prompt-optimizer/api`。`GET` → 模型目录 + 用量台账（`value.usage`）；`POST {text, model?}` → `{ok:true, value:{text, model, usage}}`，`model` 缺省即跟随会话。台账 `LEDGER` 也在这一文件。
-- `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册 `conversation.input.right` slot 条目 `prompt-optimizer`，并注入以 `.po-wrap` 为作用域根的样式。
+- `lib/index.js` — 宿主侧，两条 `kind: "exact"` 路由：`/prompt-optimizer/api`（`GET` → 模型目录 + 全局设置 `value.model` + 用量台账 `value.usage`；`POST {text, model?, follow?, sessionId?}` → `{ok:true, value:{text, model, usage}}`，模型优先级 = 请求里的 `model` > 全局设置 > 会话模型，显式 `follow: true` 跳过全局设置）与 `/prompt-optimizer/settings`（`GET`/`POST {model}` 读写全局设置）。台账 `LEDGER` 与设置文件读写在同一文件。
+- `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册两个 slot 条目——`conversation.input.right`（`prompt-optimizer`，输入框右侧按钮）与 `plugins.row.config`（键 `dsh-prompt-optimizer#prompt-optimizer`，插件详情页的「模型」设置，`view: "summary"` 回文字、`view: "page"` 回表单）。样式以 `.po-wrap`（聊天页）与 `.po-settings`（详情页卡片）为作用域根。
 - `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt / `pickModel`），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。
 - `test/layout-probe.html` + `test/cdp-probe.mjs` — 布局探针：真 Edge headless + CDP，把 client.js 的真 STYLE 灌进页面量面板边界，跨 20 种视口比例（桌面/小窗/平板/超宽矮窗/手机/断点两侧 + 图标位置 x=40/100/300/700）断言不出屏。`node test/cdp-probe.mjs <probe-url> <出图目录>`，截图落在 `test/shots/`（已 gitignore）。

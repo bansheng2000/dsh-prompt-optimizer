@@ -91,12 +91,21 @@ const CATALOG = {
 };
 const calls = [];
 let catalogBroken = false; // 让 GET 目录失败，验证下拉框挂了也不影响改写
+// 插件详情页的全局模型设置（宿主 /prompt-optimizer/settings）：null = 跟随会话模型。
+let settingsModel = null;
+const SETTINGS_PATH = "/prompt-optimizer/settings";
 const fakeFetch = async (url, init) => {
   const method = init?.method ?? "GET";
   calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+  if (String(url).endsWith(SETTINGS_PATH)) {
+    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel } }) };
+    settingsModel = JSON.parse(init.body).model ?? null;
+    return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel } }) };
+  }
   if (method === "GET") {
     if (catalogBroken) throw new Error("catalog offline");
-    return { status: 200, json: async () => CATALOG };
+    // 目录 GET 同时回带全局设置：面板据此决定「本页还没选过时用什么」。
+    return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, model: settingsModel } }) };
   }
   return { status: 200, json: async () => ({ ok: true, value: { text: "改写结果" } }) };
 };
@@ -176,6 +185,16 @@ class FakeAbortController {
 }
 // 每次调用 = 一次页面加载：client.js 里的目录缓存是模块级状态，重新挂一次就回到
 // 「本页还没拉过目录」。第一个挂载同时做契约断言（模块 id / 只向宿主要 react / inject 槽）。
+// sessionStorage 是「一个标签页」的范围：同页刷新还在，换一次 mountClient（= 新页面）也还在。
+const sharedStorage = (() => {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => { map.set(k, String(v)); },
+    removeItem: (k) => { map.delete(k); },
+    keys: () => [...map.keys()],
+  };
+})();
 function mountClient() {
   let registration;
   const style = { tag: null };
@@ -196,6 +215,7 @@ function mountClient() {
     },
     URL,
     Date: FakeDate,
+    sessionStorage: sharedStorage,
     // 新 context 只有 ECMAScript 内建对象，没有 web 平台对象：AbortController 得自己给
     // （真机渲染进程是浏览器环境，本来就有）。
     AbortController: FakeAbortController,
@@ -211,14 +231,20 @@ function mountClient() {
   });
   assert.equal(typeof face.apply, "function");
   assert.equal(face.inject.join(","), "slots");
-  let registered;
+  const entries = [];
   face.apply({
     effect: (fn) => fn(),
-    slots: { inject: (key, fn) => fn(), register: (options, Comp) => { registered = { options, Comp }; } },
+    slots: { inject: (key, fn) => fn(), register: (options, Comp) => { entries.push({ options, Comp }); } },
   });
+  assert.equal(entries.length, 2, "两个 slot：输入框按钮 + 插件详情页的设置");
+  const registered = entries.find((e) => e.options.name === "conversation.input.right");
+  const settings = entries.find((e) => e.options.name === "plugins.row.config");
   assert.equal(typeof registered.Comp, "function", "slot 条目必须直接注册组件，不能是无参包装");
   assert.equal(registered.options.id, "prompt-optimizer");
-  return { registered, style, win };
+  assert.ok(settings, "必须注册插件详情页的设置项（plugins.row.config）");
+  assert.equal(settings.options.key, "dsh-prompt-optimizer#prompt-optimizer",
+    "详情页设置以「包名#行 id」为键，键错了配置控件根本不会出现");
+  return { registered, settings, style, win };
 }
 const mount = mountClient();
 
@@ -310,6 +336,8 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.equal(post.length, 1, "点一次发一次 POST");
   assert.equal(post[0].body.text, "帮我写个爬虫", "请求体必须带当前草稿");
   assert.equal("model" in post[0].body, false, "默认跟随会话模型，请求体不该带 model");
+  assert.equal(post[0].body.follow, true,
+    "跟随会话模型必须显式报 follow:true，否则宿主会拿插件详情页的全局设置兜底");
   assert.equal("sessionId" in post[0].body, false, "L8：宿主没给会话 id 就不带这个字段（由宿主回落）");
   assert.ok(calls.some((c) => c.method === "GET"), "还要拉一次模型目录");
   const ta = panel(t).kids.find((k) => k && k.type === "textarea");
@@ -705,8 +733,11 @@ assert.ok(!/data-plugin-css/.test(bareCss), "CSS 不得用 data-plugin-css 做�
 // at-rule（@media）不是选择器，它的块里装的是别处也要遵守作用域根的规则——过滤掉再校验。
 const selectors = [...bareCss.matchAll(/(?:^|\})\s*([^{}]+?)\s*\{/g)].map((m) => m[1].trim()).filter((s) => !s.startsWith("@"));
 assert.ok(selectors.length >= 10, `应有若干条规则，实际 ${selectors.length}`);
+// 两个真实作用域根：聊天页 = .po-wrap（按钮/面板），插件详情页 = .po-settings（设置卡片）。
+// 两者都是组件自己渲染出来的祖先；别的前缀（比如 data-plugin-css）一律静默失效。
 for (const sel of selectors) {
-  assert.ok(sel.startsWith(".po-wrap"), `每条规则都要以真实祖先 .po-wrap 开头，否则静默失效：${sel}`);
+  assert.ok(sel.startsWith(".po-wrap") || sel.startsWith(".po-settings"),
+    `每条规则都要以真实祖先（.po-wrap 或 .po-settings）开头，否则静默失效：${sel}`);
 }
 // 面板必须绝对定位且不被裁：宿主 .RlGAzG_card 只有 box-sizing/圆角/阴影，没有 overflow:hidden，
 // 所以挂在按钮旁的 .po-panel 能溢出到输入框上方。
@@ -760,7 +791,7 @@ for (const m of bareCss.matchAll(/var\((--[a-z0-9-]+)/g)) {
 const { apply } = await import("../lib/index.js");
 let route, dispose;
 apply({ inject: (deps, fn) => fn({ effect: (fn2) => { dispose = fn2(); },
-  webServer: { register: (r) => { route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
+  webServer: { register: (r) => { if (r.path === "/prompt-optimizer/api") route = r; return () => { route = undefined; }; } } }) }, { rules: { storeFile: TMP, modelFile: join(TMP_DIR, "main-model.json"), minIntervalMs: 0, catalogTtlMs: 0 } });
 assert.equal(route.kind, "exact");
 assert.equal(route.path, "/prompt-optimizer/api", "路由路径必须带前导斜杠，否则宿主 match() 匹配不到");
 
@@ -831,7 +862,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     agents: { get: () => ({ session: { requestHeader: () => ({ config: { provider: "hdr", model: "hdr" } }) } }) },
     // 真实形状：宿主 ClientSessions 没有 current()（照 dsh-api-session-controller 抄）
     sessions: {},
-    webServer: { register: (r) => { r3 = r; return () => {}; } },
+    webServer: { register: (r) => { if (r.path === "/prompt-optimizer/api") r3 = r; return () => {}; } },
   }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   assert.equal(r3.path, "/prompt-optimizer/api");
   const callWith = (method, body) => new Promise((resolve) => {
@@ -910,7 +941,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       llm,
       // 没有它 resolveTarget 会返回 null → 503 no-route，根本走不到查询用量的那段
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
-      webServer: { register: (x) => { r = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") r = x; return () => {}; } },
     }) }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0, ...(config?.rules ?? {}) } });
     return r;
   };
@@ -1001,7 +1032,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       inject: (deps, fn) => fn({
         effect: (f) => { f(); },
         llm: { listProviders: () => [], listModels: async () => [] },
-        webServer: { register: (x) => { r = x; return () => {}; } },
+        webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") r = x; return () => {}; } },
       }),
       ...ctxExtra,
     }, config);
@@ -1054,7 +1085,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
     inject: (deps, fn) => fn({
       effect: (f) => { f(); },
       llm: { listProviders: () => [], listModels: async () => [] },
-      webServer: { register: (x) => { route = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") route = x; return () => {}; } },
     }),
   }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
 
@@ -1111,7 +1142,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
         })(),
       },
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
-      webServer: { register: (x) => { route = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") route = x; return () => {}; } },
     }),
   }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } }); // 先关掉频率闸，单独验并发闸
 
@@ -1148,7 +1179,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
       llm: { listProviders: () => [], listModels: async () => [],
         stream: () => (async function* () { yield { type: "text-delta", text: "正文" }; })() },
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
-      webServer: { register: (x) => { route2 = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") route2 = x; return () => {}; } },
     }),
   }, { rules: { storeFile: TMP } }); // 不传 minIntervalMs → 用默认 800
   const post2 = () => new Promise((resolve) => {
@@ -1203,7 +1234,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
           throw new Error("fetch failed https://api.secret.example/v1?token=sk-deadbeef123456 user@corp.example");
         })() },
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
-      webServer: { register: (x) => { route = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") route = x; return () => {}; } },
     }),
   }, { rules: { storeFile: TMP, minIntervalMs: 0, catalogTtlMs: 0 } });
   const res = await new Promise((resolve) => {
@@ -1236,7 +1267,7 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
         listModels: async () => [{ id: "m", name: "M" }],
         stream: () => (async function* () { yield { type: "text-delta", text: "正文" }; })() },
       agentDefaultModel: { currentSelection: () => ({ provider: "p", model: "m" }) },
-      webServer: { register: (x) => { route = x; return () => {}; } },
+      webServer: { register: (x) => { if (x.path === "/prompt-optimizer/api") route = x; return () => {}; } },
     }),
   }, { rules: { storeFile: TMP, minIntervalMs: 0 } }); // 不传 catalogTtlMs → 验默认 60s
 
@@ -1305,6 +1336,197 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   land?.(new Error("aborted")); // 让挂着的 promise 落地，别留悬空 rejection
   await pending.catch(() => {});
   sandbox.fetch = fakeFetch;
+}
+
+// --- 插件详情页的「模型」设置：默认跟随会话模型，可指定其他模型（全局）---
+{
+  const page = await mountClient();
+  // summary 视图只回一段文字（宿主不会为摘要拉数据），默认就是用户要的「跟随会话模型」
+  const summary = page.settings.Comp({ view: "summary" });
+  assert.equal(typeof summary, "string", "summary 视图必须回一段文字");
+  assert.match(summary, /跟随会话模型/, "默认值必须是「跟随会话模型」");
+
+  // page 视图：真实表单（假 React 会真跑 useEffect）。hook 槽位只在第一次挂载时清空，
+  // 之后的重渲染沿用 —— 与真 React 一致，useEffect([]) 不会每次重渲染都重跑。
+  const renderCard = () => {
+    const el = page.settings.Comp({ view: "page" });
+    assert.ok(el && typeof el.type === "function", "page 视图要回表单组件");
+    ui.cur = 0; ui.refCur = 0; ui.effectCur = 0;
+    inRender = true;
+    try { return el.type(); } finally { inRender = false; }
+  };
+  const cardSel = (tree) => deepFind(tree, (k) => k && k.type === "select");
+  settingsModel = null;
+  calls.length = 0;
+  ui.s.length = 0; ui.refs.length = 0; ui.effects.length = 0;
+  let card = renderCard();
+  await flush(); await flush();
+  card = renderCard();
+  assert.ok(cardSel(card), "设置卡片里要有模型下拉框");
+  assert.equal(cardSel(card).props.value, "", "默认选中「跟随会话模型」");
+  assert.equal(cardSel(card).kids[0].kids[0], "跟随会话模型", "第一项必须是跟随会话模型");
+  assert.ok(cardSel(card).kids.length >= 3, "目录里的模型都要能选");
+
+  // 选一个模型 → 立刻保存（这张表单没有暂存态，所以离开页面不会丢掉未保存的改动）
+  cardSel(card).props.onChange({ target: { value: "deepseek-official/deepseek-reasoner" } });
+  await flush(); await flush();
+  const saved = calls.filter((c) => c.method === "POST" && c.url.endsWith(SETTINGS_PATH));
+  assert.equal(saved.length, 1, "选中即保存（POST 到设置路由）");
+  assert.deepEqual(saved[0].body, { model: { provider: "deepseek-official", model: "deepseek-reasoner" } });
+  assert.deepEqual(settingsModel, { provider: "deepseek-official", model: "deepseek-reasoner" }, "宿主那边真的存下了");
+  assert.match(page.settings.Comp({ view: "summary" }), /deepseek-reasoner/, "摘要跟着当前设置走");
+
+  // 重新进详情页：从宿主读回上次存的设置
+  ui.s.length = 0; ui.refs.length = 0; ui.effects.length = 0;
+  card = renderCard();
+  await flush(); await flush();
+  card = renderCard();
+  assert.equal(cardSel(card).props.value, "deepseek-official/deepseek-reasoner", "再次打开时要显示已保存的设置");
+
+  // 保存失败要看得见（不许静默）
+  const goodFetch = sandbox.fetch;
+  sandbox.fetch = async (url, init) => {
+    if (String(url).endsWith(SETTINGS_PATH) && (init?.method ?? "GET") === "POST") {
+      return { status: 500, json: async () => ({ ok: false, error: { message: "写不进去" } }) };
+    }
+    return goodFetch(url, init);
+  };
+  cardSel(renderCard()).props.onChange({ target: { value: "" } });
+  await flush(); await flush();
+  card = renderCard();
+  const errEl = deepFind(card, (k) => k && k.props && k.props.className === "po-settings-err");
+  assert.ok(errEl, "保存失败要在卡片上写出来");
+  assert.match(String(errEl.kids[0]), /保存失败/);
+  sandbox.fetch = goodFetch;
+  settingsModel = null;
+}
+
+// --- 聊天页设置优先：全局设置只当「本页还没选过」的初始值，且页内保持一致 ---
+{
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+  settingsModel = { provider: "deepseek-official", model: "deepseek-reasoner" };
+  const page = await mountClient(); // 新页面：目录缓存清空
+  let t = fresh(INPUT, page);
+  await btn(t).onClick();
+  await flush(); await flush(); await flush();
+  t = render(INPUT, page);
+  assert.equal(deepFind(panel(t), (k) => k && k.type === "select").props.value, "deepseek-official/deepseek-reasoner",
+    "本页没选过 → 下拉框落到全局设置");
+  const posts = () => calls.filter((c) => c.method === "POST" && !c.url.endsWith(SETTINGS_PATH));
+  assert.deepEqual(posts()[0].body.model, { provider: "deepseek-official", model: "deepseek-reasoner" },
+    "第一次请求就要按全局设置走（不能先跟随会话再改口）");
+  assert.equal("follow" in posts()[0].body, false, "指定了模型就不该再带 follow");
+
+  // 本页改成「跟随会话模型」→ 记住，且请求显式 follow（全局设置不许抢走）
+  deepFind(panel(render(INPUT, page)), (k) => k && k.type === "select").props.onChange({ target: { value: "" } });
+  await actBtn(render(INPUT, page), "重新生成").props.onClick();
+  await flush();
+  assert.equal(posts().at(-1).body.follow, true, "本页选了跟随 → follow:true，全局设置不再参与");
+  assert.equal("model" in posts().at(-1).body, false);
+  assert.equal(sharedStorage.getItem("po.model.default"), "follow", "本页的选择要按会话记在本页里");
+
+  // 换页面（同一个标签页 = 同一份 sessionStorage）：本页的选择还在，全局设置不许盖回去
+  const page2 = await mountClient();
+  const t2 = fresh(INPUT, page2);
+  await btn(t2).onClick();
+  await flush(); await flush(); await flush();
+  const tree2 = render(INPUT, page2);
+  const sel2 = deepFind(panel(tree2), (k) => k && k.type === "select");
+  assert.equal(sel2.props.value, "", "刷新/重开后仍是本页选的「跟随会话模型」");
+  assert.equal(posts().at(-1).body.follow, true, "仍然显式跟随，不被全局设置盖掉");
+
+  // 指定模型的页选择同样记在本页
+  sel2.props.onChange({ target: { value: "deepseek-official/deepseek-chat" } });
+  assert.equal(sharedStorage.getItem("po.model.default"), "deepseek-official/deepseek-chat");
+  settingsModel = null;
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+}
+
+// --- 全局模型设置（宿主）：读写 + 优先级「聊天页 > 全局 > 会话」---
+{
+  const settingsFile = join(TMP_DIR, "pref-model.json");
+  const prefUsage = join(TMP_DIR, "pref-usage.json");
+  rmSync(settingsFile, { force: true });
+  rmSync(prefUsage, { force: true });
+  const boot = async (query, extra) => {
+    let api, settings;
+    let used = null;
+    const { apply: ap } = await import("../lib/index.js" + query);
+    ap({
+      inject: (deps, fn) => fn({
+        effect: (f) => { f(); },
+        llm: {
+          listProviders: () => [{ id: "p-only", name: "Only" }],
+          listModels: async () => [{ id: "m-only", name: "Only Model" }],
+          stream: (opts) => {
+            used = { provider: opts.provider, model: opts.model };
+            return (async function* () { yield { type: "text-delta", text: "正文" }; })();
+          },
+        },
+        agentDefaultModel: { currentSelection: () => ({ provider: "sess", model: "sess" }) },
+        agents: {},
+        sessions: {},
+        webServer: { register: (r) => {
+          if (r.path === "/prompt-optimizer/settings") settings = r;
+          else if (r.path === "/prompt-optimizer/api") api = r;
+          return () => {};
+        } },
+      }),
+    }, { rules: { storeFile: prefUsage, modelFile: settingsFile, minIntervalMs: 0, catalogTtlMs: 0, ...extra } });
+    return { api, settings, used: () => used };
+  };
+  const hit = (route, method, body) => new Promise((resolve) => {
+    const res = { status: 0, payload: undefined,
+      writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    const req = { method, url: route.path, headers: { host: "127.0.0.1:19387", "content-type": "application/json" },
+      on(ev, fn) { this[ev] = fn; }, destroy() {} };
+    route.handler(req, res).catch((e) => resolve({ status: 500, payload: { error: { message: String(e) } } }));
+    setTimeout(() => { if (typeof req.data === "function") { req.data(Buffer.from(body)); req.end(); } }, 0);
+  });
+
+  const s1 = await boot("?pref=1", {});
+  assert.ok(s1.settings, "设置路由必须注册");
+  assert.equal(s1.settings.path, "/prompt-optimizer/settings");
+  assert.equal((await hit(s1.settings, "GET", "")).payload.value.model, null, "默认 = 跟随会话模型");
+  const saved = await hit(s1.settings, "POST", JSON.stringify({ model: { provider: "p-only", model: "m-only" } }));
+  assert.equal(saved.status, 200);
+  assert.deepEqual(saved.payload.value.model, { provider: "p-only", model: "m-only" });
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, "utf8")), { model: { provider: "p-only", model: "m-only" } },
+    "设置要落盘（与台账同一套目录规则）");
+  assert.deepEqual((await hit(s1.api, "GET", "")).payload.value.model, { provider: "p-only", model: "m-only" },
+    "目录 GET 也回带全局设置，面板据此决定初始值");
+
+  const fallback = await hit(s1.api, "POST", JSON.stringify({ text: "hi" }));
+  assert.equal(fallback.status, 200);
+  assert.equal(s1.used().provider + "/" + s1.used().model, "p-only/m-only", "两者都没带（老客户端）→ 全局设置兜底");
+  const follow = await hit(s1.api, "POST", JSON.stringify({ text: "hi", follow: true }));
+  assert.equal(follow.status, 200);
+  assert.equal(s1.used().provider + "/" + s1.used().model, "sess/sess", "follow:true 不许被全局设置盖掉");
+  const picked = await hit(s1.api, "POST", JSON.stringify({ text: "hi", model: { provider: "x", model: "y" } }));
+  assert.equal(picked.status, 200);
+  assert.equal(s1.used().provider + "/" + s1.used().model, "x/y", "聊天页选的模型优先级最高");
+
+  const s2 = await boot("?pref=2", {});
+  assert.deepEqual((await hit(s2.settings, "GET", "")).payload.value.model, { provider: "p-only", model: "m-only" },
+    "重启（新模块实例）后设置还在");
+  const cleared = await hit(s2.settings, "POST", JSON.stringify({ model: null }));
+  assert.equal(cleared.payload.value.model, null, "清回「跟随会话模型」");
+  assert.equal((await hit(s2.settings, "POST", JSON.stringify({ model: "乱七八糟" }))).payload.value.model, null,
+    "残缺/非法形状一律当跟随，不许把整串当模型存下来");
+
+  const s3 = await boot("?pref=3", { modelFile: TMP_DIR });
+  const broken = await hit(s3.settings, "POST", JSON.stringify({ model: { provider: "p", model: "m" } }));
+  assert.equal(broken.status, 500, "写不进去要如实报错，不许假装存上了");
+  assert.equal(broken.payload.error.code, "save-failed");
+
+  const evil = await new Promise((resolve) => {
+    const r = { status: 0, payload: undefined, writeHead(st) { this.status = st; },
+      end(t) { this.payload = JSON.parse(t); resolve(this); } };
+    s1.settings.handler({ method: "GET", url: "/prompt-optimizer/settings",
+      headers: { host: "127.0.0.1:19387", origin: "https://evil.example" }, on() {}, destroy() {} }, r);
+  });
+  assert.equal(evil.status, 403, "跨站 Origin 一样要挡住设置路由");
 }
 
 console.log("ok - prompt-optimizer self-test passed");

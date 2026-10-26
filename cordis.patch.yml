@@ -11,6 +11,11 @@
 #   rules:
 #     maxInputChars: 8000   # 超过这个长度的草稿直接拒绝请求
 #     timeoutMs: 60000      # 单次 LLM 改写超时
+#     storeFile: ...        # 用量台账落盘位置（默认 <profile>/prompt-optimizer-usage.json）
+#     modelFile: ...        # 全局模型设置落盘位置（默认 <profile>/prompt-optimizer-model.json）
+#
+# 模型优先级：聊天页面板里选的 > 本插件详情页的「模型」设置（全局，默认跟随会话模型）> 会话当前模型。
+# 显式 follow:true 的请求一定跟随会话，不被全局设置兜底。
 - insert:
     - id: prompt-optimizer
       name: dsh-prompt-optimizer
