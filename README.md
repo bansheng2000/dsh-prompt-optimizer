@@ -8,6 +8,7 @@
 
 - 点它 → 读当前草稿 → POST 宿主路由改写 → **面板弹出**，文本框里就是改写结果。
 - 面板右上角下拉框选模型，首项「跟随会话模型」即默认（跟随会话当前 provider/model）。**聊天页里的选择优先于插件详情页的全局设置，并在该页内保持不变**（见下文「模型设置」）。
+- 面板第二行可以选**风格**（标准 / 审查型 / 精简 / 角色设定）和勾选**可复用模板**：勾上后改写结果会把具体值换成 `{{变量}}`，面板下方列出这条模板里的全部变量。
 - 文本框随便改；「重新生成」按**当下草稿**再跑一遍（不是拿面板里的旧文本）。
 - 「用这条」把文本框内容写回输入框，然后收起面板。
 - 空草稿：面板照弹（让人看见为什么没结果），不发请求，红字说明原因。
@@ -57,14 +58,24 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 
 ## 用量统计
 
-面板底部有一行用量：
+分成两块，各管一件事：
+
+**聊天页面板**只显示**这一次改写**的输入/输出：
 
 ```
-累计 token：输入 12.3K · 输出 567 · 合计 2.1M（缓存读 200 / 写 0） · 成功 1 / 尝试 2 · 约 0.0123 CNY
+本次 token：输入 1.2K · 输出 567
 ```
 
-数字超过 1000 就缩成 `K`/`M`/`B`（`1234` → `1.2K`、`2001` → `2K`、`1234567890` → `1.2B`），一行放得下；**精确值在悬停提示里**。
-悬停先讲统计范围（哪一段账、何时起算、不含什么、账本在哪），再给逐项精确到个位的数字，最后是单价来源。
+数字超过 1000 就缩成 `K`/`M`/`B`（`1234` → `1.2K`、`2001` → `2K`），**精确值在悬停提示里**。
+
+**插件详情页**（插件 → dsh-prompt-optimizer → 配置）显示**累计**统计，并带一个「清除统计」按钮：
+
+```
+累计 token：输入 12.3K · 输出 567 · 合计 2.1M（缓存读 200 / 写 0） · 约 0.0123 CNY
+成功 1 / 尝试 2 · 失败 0 · 自 2026-10-27 18:00:00 起算
+```
+
+清除只清台账（token 与成功/尝试/失败全部归零、起算时间重置），不动模型设置；下一次改写重新开始累计。
 
 **口径**（宿主 `TokenUsage` 的定义，asar 实测：`usage.totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens`）：
 
@@ -107,9 +118,9 @@ pnpm add github:bansheng2000/dsh-prompt-optimizer
 **核对**：`GET /prompt-optimizer/api` 会连台账一起返回（`value.usage`），可拿来跟界面上那行对照。
 
 ## 文件
-- `lib/index.js` — 宿主侧，两条 `kind: "exact"` 路由：`/prompt-optimizer/api`（`GET` → 模型目录 + 全局设置 `value.model` + 用量台账 `value.usage`；`POST {text, model?, follow?, sessionId?}` → `{ok:true, value:{text, model, usage}}`，模型优先级 = 请求里的 `model` > 全局设置 > 会话模型，显式 `follow: true` 跳过全局设置）与 `/prompt-optimizer/settings`（`GET`/`POST {model}` 读写全局设置）。台账 `LEDGER` 与设置文件读写在同一文件。
+- `lib/index.js` — 宿主侧，两条 `kind: "exact"` 路由：`/prompt-optimizer/api`（`GET` → 模型目录 + 全局设置 `value.model` + 用量台账 `value.usage`；`POST {text, model?, follow?, sessionId?, style?, template?}` → `{ok:true, value:{text, model, style, template, used, usage}}`，`used` 是**本次**请求（含重试）的用量，`usage` 是累计；模型优先级 = 请求里的 `model` > 全局设置 > 会话模型，显式 `follow: true` 跳过全局设置）与 `/prompt-optimizer/settings`（`GET` → `{model, usage}`；`POST {model}` 存设置、`POST {clear:"usage"}` 清台账）。
 - `lib/client.js` — 浏览器侧 `window.__ModuleLoader__.load` 工厂：注册两个 slot 条目——`conversation.input.right`（`prompt-optimizer`，输入框右侧按钮）与 `plugins.row.config`（键 `dsh-prompt-optimizer#prompt-optimizer`，插件详情页的「模型」设置，`view: "summary"` 回文字、`view: "page"` 回表单）。样式以 `.po-wrap`（聊天页）与 `.po-settings`（详情页卡片）为作用域根。
-- `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt / `pickModel`），不 import 宿主，可单独自测。
+- `lib/optimize.js` — 纯逻辑（校验 / 剥围栏 / system prompt 组装 `buildSystemPrompt(style, template)` / `pickModel` / `pickStyle` / `pickTemplate`），不 import 宿主，可单独自测。
 - `test/selftest.mjs` — `node test/selftest.mjs`，不连宿主。
 - `test/layout-probe.html` + `test/cdp-probe.mjs` — 布局探针：真 Edge headless + CDP，把 client.js 的真 STYLE 灌进页面量面板边界，跨 20 种视口比例（桌面/小窗/平板/超宽矮窗/手机/断点两侧 + 图标位置 x=40/100/300/700）断言不出屏。`node test/cdp-probe.mjs <probe-url> <出图目录>`，截图落在 `test/shots/`（已 gitignore）。
 

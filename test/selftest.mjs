@@ -93,14 +93,21 @@ const calls = [];
 let catalogBroken = false; // 让 GET 目录失败，验证下拉框挂了也不影响改写
 // 插件详情页的全局模型设置（宿主 /prompt-optimizer/settings）：null = 跟随会话模型。
 let settingsModel = null;
+// 设置页展示的累计用量（由具体用例设置；默认空 = 还没跑过一次改写）
+let usageModel = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, requests: 0, attempts: 0, failed: 0, since: 1700000000000, scope: "persistent", price: null, priceSource: null, cost: null, storeName: "prompt-optimizer-usage.json" };
 const SETTINGS_PATH = "/prompt-optimizer/settings";
 const fakeFetch = async (url, init) => {
   const method = init?.method ?? "GET";
   calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
   if (String(url).endsWith(SETTINGS_PATH)) {
-    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel } }) };
-    settingsModel = JSON.parse(init.body).model ?? null;
-    return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel } }) };
+    const sent = init?.body ? JSON.parse(init.body) : undefined;
+    if (method === "POST" && sent?.clear === "usage") {
+      usageModel = { ...usageModel, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0, requests: 0, attempts: 0, failed: 0 };
+      return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel, usage: usageModel, cleared: true } }) };
+    }
+    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel, usage: usageModel } }) };
+    settingsModel = sent.model ?? null;
+    return { status: 200, json: async () => ({ ok: true, value: { model: settingsModel, usage: usageModel } }) };
   }
   if (method === "GET") {
     if (catalogBroken) throw new Error("catalog offline");
@@ -659,59 +666,108 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
   assert.match(String(msgOf(t).kids[0] ?? ""), /生成失败.*模型不可用/, "失败原因要留在面板上");
   sandbox.fetch = fakeFetch;
 }
-// --- 用量行：宿主回带 usage 才有；输入/输出/合计分开；没配单价就只报 token ---
+// --- 面板用量行：只显示本次的输入/输出（累计统计已搬去插件设置页）---
 {
-  let host = { input: 1234, output: 567, cacheRead: 200, cacheWrite: 0, total: 2001,
-    requests: 1, attempts: 2, failed: 0, since: 1700000000000, scope: "process",
+  const used = { input: 1234, output: 567, cacheRead: 200, cacheWrite: 0, total: 2001 };
+  const hostUsage = { input: 9999, output: 888, cacheRead: 0, cacheWrite: 0, total: 10887,
+    requests: 7, attempts: 9, failed: 1, since: 1700000000000, scope: "persistent",
     price: null, priceSource: null, cost: null };
   sandbox.fetch = async (url, init) => {
     const method = init?.method ?? "GET";
     calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
-    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, usage: host } }) };
-    return { status: 200, json: async () => ({ ok: true, value: { text: "带用量的结果", usage: host } }) };
+    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, usage: hostUsage } }) };
+    return { status: 200, json: async () => ({ ok: true, value: { text: "带用量的结果", used, usage: hostUsage } }) };
   };
   const statsEl = (tree) => deepFind(tree, (k) => k && k.props && k.props.className === "po-stats");
   let t = fresh(INPUT);
   await btn(t).onClick();
-  await flush();
-  await flush();
+  await flush(); await flush();
   t = render(INPUT);
   const el = statsEl(t);
-  assert.ok(el, "宿主回了 usage 就该有用量行");
+  assert.ok(el, "宿主回了 used 就该有本次用量行");
   const line = el.kids[0];
-  assert.match(line, /输入 1\.2K/, "过长的数字缩成 K/M/B，一行放得下");
-  assert.match(line, /输出 567/, "没到 1000 就照原样写，别把 567 写成 0.6K");
-  assert.match(line, /合计 2K/, "合计也跟着缩写");
-  assert.match(line, /缓存读 200/, "缓存读写要单列");
-  assert.match(line, /成功 1 \/ 尝试 2/, "重试/失败也要让用户看见（那里也花了钱）");
-  assert.ok(!/约/.test(line), "没配单价就只能报 token，不许出现金额");
-  assert.match(el.props.title, /累计至今/, "悬停先讲统计范围（哪一段账、何时起算）");
-  assert.match(el.props.title, /重启不清零/, "悬停要说清这是持久账，不是本次进程的账");
-  assert.match(el.props.title, /输入 1,234/, "悬停里给精确值——缩写只是显示层");
-  assert.match(el.props.title, /合计 2,001/, "悬停里的合计也要精确");
-  assert.match(el.props.title, /不含普通聊天/, "悬停要把口径写全（只算本插件的改写请求）");
-  assert.match(el.props.title, /未配单价/, "悬停要说明为什么没有金额");
-  // 配了单价（宿主 rules.price）→ 金额出现，且悬停标出单价来源
-  host = { ...host, price: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0, currency: "CNY" },
-    priceSource: "config.rules.price (DSH profile cordis.patch.yml)",
-    cost: { input: 0.003702, output: 0.008505, cacheRead: 0.00006, cacheWrite: 0, total: 0.012267, currency: "CNY" } };
-  await actBtn(t, "重新生成").props.onClick();
-  await flush();
-  t = render(INPUT);
-  const el2 = statsEl(t);
-  assert.match(el2.kids[0], /约 0\.0123 CNY/, "配了单价才显示金额");
-  assert.match(el2.props.title, /config\.rules\.price/, "悬停要写明单价来源，不留孤立数字");
-  // 十亿级也不能把面板撑爆：B + 一位小数，精确值仍在悬停里
-  host = { ...host, input: 1_234_567_890, output: 12_345, cacheRead: 0, cacheWrite: 0, total: 1_234_580_235 };
-  await actBtn(t, "重新生成").props.onClick();
-  await flush();
-  t = render(INPUT);
-  const el3 = statsEl(t);
-  assert.match(el3.kids[0], /输入 1\.2B/, "十亿级用 B");
-  assert.match(el3.kids[0], /输出 12\.3K/, "千级用 K 且保留一位小数");
-  assert.match(el3.props.title, /输入 1,234,567,890/, "悬停里仍是精确到个位的值");
+  assert.match(line, /输入 1\.2K/, "过长的数字缩成 K/M/B");
+  assert.match(line, /输出 567/, "没到 1000 照原样写");
+  assert.match(line, /^本次 token：/, "面板只讲这一次改写");
+  for (const noise of ["合计", "缓存读", "成功", "尝试", "约 "]) {
+    assert.ok(!line.includes(noise), "面板不该再显示「" + noise + "」——累计统计在设置页：" + line);
+  }
+  assert.match(el.props.title, /本次改写/, "悬停也只讲本次");
+  assert.match(el.props.title, /输入 1,234/, "悬停给精确值");
+  assert.match(el.props.title, /插件 → dsh-prompt-optimizer → 配置/, "悬停要指路到设置页");
   sandbox.fetch = fakeFetch;
 }
+
+// --- 风格 + 可复用模板：面板可选，请求体带 style/template，结果里的变量要列出来 ---
+{
+  const TEMPLATE_TEXT = "你是 {{角色}}，请针对 {{产品名}} 用 {{语气}} 写一段文案。";
+  sandbox.fetch = async (url, init) => {
+    const method = init?.method ?? "GET";
+    calls.push({ method, url: String(url), body: init?.body ? JSON.parse(init.body) : undefined });
+    if (method === "GET") return { status: 200, json: async () => ({ ok: true, value: { ...CATALOG.value, model: null, usage: usageModel } }) };
+    return { status: 200, json: async () => ({ ok: true, value: { text: TEMPLATE_TEXT, used: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, total: 30 } } }) };
+  };
+  let t = fresh(INPUT);
+  await btn(t).onClick();
+  await flush(); await flush();
+  t = render(INPUT);
+  const styleSel = deepFind(panel(t), (k) => k && k.type === "select" && k.props["aria-label"] === "改写风格");
+  assert.ok(styleSel, "面板要有「风格」下拉");
+  assert.deepEqual(styleSel.kids.map((k) => k.props.value), ["standard", "review", "concise", "role"], "四种风格都在，标准排第一");
+  const tplBox = () => deepFind(panel(render(INPUT)), (k) => k && k.type === "input" && k.props.type === "checkbox");
+  assert.equal(tplBox().props.checked, false, "模板开关默认关闭");
+  styleSel.props.onChange({ target: { value: "review" } });
+  tplBox().props.onChange({ target: { checked: true } });
+  t = render(INPUT);
+  await actBtn(t, "重新生成").props.onClick();
+  await flush();
+  const last = calls.filter((c) => c.method === "POST" && !c.url.endsWith(SETTINGS_PATH)).at(-1);
+  assert.equal(last.body.style, "review", "风格要发给宿主");
+  assert.equal(last.body.template, true, "模板开关要发给宿主");
+  t = render(INPUT);
+  const varsEl = deepFind(t, (k) => k && k.props && k.props.className === "po-vars");
+  assert.ok(varsEl, "模板模式下要在面板里列出变量");
+  const varsText = String(varsEl.kids[0]);
+  for (const v of ["角色", "产品名", "语气"]) assert.ok(varsText.includes("{{" + v + "}}"), "变量清单要含 " + v);
+  assert.equal(new Set(varsText.match(/\{\{[^}]+\}\}/g)).size, 3, "重复变量只列一次");
+  sandbox.fetch = fakeFetch;
+}
+
+// --- 设置页：累计用量 + 成功/尝试/失败 + 清除统计 ---
+{
+  usageModel = { input: 2000, output: 500, cacheRead: 100, cacheWrite: 0, total: 2600,
+    requests: 4, attempts: 5, failed: 1, since: 1700000000000, scope: "persistent",
+    price: null, priceSource: null, cost: null, storeName: "prompt-optimizer-usage.json" };
+  const page = await mountClient();
+  const renderCard = () => {
+    ui.cur = 0; ui.refCur = 0; ui.effectCur = 0;
+    inRender = true;
+    try { return page.settings.Comp({ view: "page" }).type(); } finally { inRender = false; }
+  };
+  ui.s.length = 0; ui.refs.length = 0; ui.effects.length = 0;
+  calls.length = 0;
+  let card = renderCard();
+  await flush(); await flush();
+  card = renderCard();
+  const usageEl = deepFind(card, (k) => k && k.props && k.props.className === "po-settings-usage");
+  assert.ok(usageEl, "设置页要有累计用量块");
+  const lineOf = (tree) => deepFind(tree, (k) => k && k.props && String(k.kids && k.kids[0] || "").includes("累计 token"));
+  const countsOf = (tree) => deepFind(tree, (k) => k && k.props && String(k.kids && k.kids[0] || "").includes("成功 "));
+  const lineEl = lineOf(card);
+  assert.ok(lineEl, "要显示累计 token");
+  assert.match(String(lineEl.kids[0]), /输入 2K/, "累计输入按 K 缩写");
+  assert.match(String(lineEl.kids[0]), /合计 2\.6K/, "累计合计");
+  assert.match(String(countsOf(card).kids[0]), /成功 4 \/ 尝试 5 · 失败 1/, "成功/尝试/失败都要有");
+  const clearBtn = deepFind(card, (k) => k && k.type === "button" && k.kids[0] === "清除统计");
+  assert.ok(clearBtn, "要有清除按钮");
+  clearBtn.props.onClick();
+  await flush(); await flush();
+  card = renderCard();
+  assert.match(String(lineOf(card).kids[0]), /输入 0 · 输出 0/, "清除后归零");
+  assert.ok(calls.some((c) => c.method === "POST" && c.url.endsWith(SETTINGS_PATH) && c.body && c.body.clear === "usage"),
+    "清除要 POST clear=usage");
+}
+
 // --- CSS 断言（图标尺寸 + all:unset 保持不变）---
 const styleCss = mount.style.tag.textContent;
 const iconCss = /\.po-icon \{([^}]*)\}/.exec(styleCss)[1];
@@ -839,6 +895,25 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.deepEqual(pickModel({ model: { provider: " p ", model: " m " } }), { provider: "p", model: "m" }, "要去空白");
 }
 
+// --- 风格 / 模板（纯逻辑）---
+{
+  const { pickStyle, pickTemplate, buildSystemPrompt, STYLES } = await import("../lib/optimize.js");
+  assert.deepEqual(STYLES, ["standard", "review", "concise", "role"]);
+  assert.equal(pickStyle({}), "standard", "缺省就是标准");
+  assert.equal(pickStyle({ style: " REVIEW " }), "review", "去空白 + 小写");
+  assert.equal(pickStyle({ style: "bogus" }), "standard", "未知风格回落标准，不许报错");
+  assert.equal(pickStyle({ style: 42 }), "standard");
+  assert.equal(pickTemplate({}), false, "模板默认关");
+  assert.equal(pickTemplate({ template: true }), true);
+  assert.equal(pickTemplate({ template: "yes" }), false, "只认布尔 true");
+  assert.equal(buildSystemPrompt("standard", false), SYSTEM_PROMPT, "默认组合必须与旧版逐字一致");
+  assert.match(buildSystemPrompt("review", false), /审查型/);
+  assert.match(buildSystemPrompt("concise", false), /精简/);
+  assert.match(buildSystemPrompt("role", false), /角色设定/);
+  assert.match(buildSystemPrompt("standard", true), /\{\{变量名\}\}/, "模板模式要说明变量写法");
+  assert.ok(!buildSystemPrompt("standard", false).includes("模板模式"));
+}
+
 
 // --- 宿主必须真的按客户端选的模型去调，并回显实际用的那个 ---
 // 上面的 call() 假 ctx 没有 llm.stream，POST 在 503 就返回了，走不到模型解析——
@@ -893,6 +968,16 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(picked.status, 200);
   assert.equal(used.provider + "/" + used.model, "p-only/m-only", "客户端选的模型必须优先于会话模型");
   assert.deepEqual(picked.payload.value.model, { provider: "p-only", model: "m-only" });
+  // 风格 / 模板 → system prompt 跟着变；默认组合与旧版逐字一致
+  const styled = await callWith("POST", JSON.stringify({ text: "hi", style: "review", template: true }));
+  assert.equal(styled.status, 200);
+  assert.match(String(used.system), /审查型/, "风格要进 system prompt");
+  assert.match(String(used.system), /模板模式/, "模板模式要进 system prompt");
+  assert.equal(styled.payload.value.style, "review", "响应要回显实际用的风格");
+  assert.equal(styled.payload.value.template, true);
+  const plainRun = await callWith("POST", JSON.stringify({ text: "hi" }));
+  assert.equal(plainRun.status, 200);
+  assert.equal(used.system, SYSTEM_PROMPT, "不传风格/模板时必须与旧版 system prompt 逐字一致");
   // 模型只吐空白 → 502（别把空面板交给用户）
   fakeLlm.stream = () => (async function* () { yield { type: "text-delta", text: "   " }; })();
   const blank = await callWith("POST", JSON.stringify({ text: "hi" }));
@@ -1549,6 +1634,21 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   assert.equal(cleared.payload.value.model, null, "清回「跟随会话模型」");
   assert.equal((await hit(s2.settings, "POST", JSON.stringify({ model: "乱七八糟" }))).payload.value.model, null,
     "残缺/非法形状一律当跟随，不许把整串当模型存下来");
+
+  // 清除累计统计（设置页的「清除统计」）：token 与成功/尝试/失败全部归零，并且落盘
+  const beforeClear = (await hit(s2.settings, "GET", "")).payload.value.usage;
+  assert.ok(beforeClear.requests > 0, "清除前应该已经有账（前面几条改写）");
+  const clearedUsage = await hit(s2.settings, "POST", JSON.stringify({ clear: "usage" }));
+  assert.equal(clearedUsage.status, 200);
+  assert.equal(clearedUsage.payload.value.cleared, true);
+  const afterClear = clearedUsage.payload.value.usage;
+  assert.equal(afterClear.input, 0, "清除后输入归零");
+  assert.equal(afterClear.output, 0);
+  assert.equal(afterClear.requests, 0);
+  assert.equal(afterClear.attempts, 0);
+  assert.equal(afterClear.failed, 0);
+  assert.ok(afterClear.since >= beforeClear.since, "起算时间重置到清除那一刻");
+  assert.equal(JSON.parse(readFileSync(prefUsage, "utf8")).input, 0, "清除要落盘（重启后不该复活）");
 
   const s3 = await boot("?pref=3", { modelFile: TMP_DIR });
   const broken = await hit(s3.settings, "POST", JSON.stringify({ model: { provider: "p", model: "m" } }));
