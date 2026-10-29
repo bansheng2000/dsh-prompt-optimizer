@@ -679,6 +679,20 @@ const getModelIcon = (props, m) => deepFind(render(props, m), (k) => k?.props?.c
     return { status: 200, json: async () => ({ ok: true, value: { text: "带用量的结果", used, usage: hostUsage } }) };
   };
   const statsEl = (tree) => deepFind(tree, (k) => k && k.props && k.props.className === "po-stats");
+  // 只打开面板、没改写时不能显示任何用量：GET 回的是累计台账，不是「本次」。
+  {
+    const savedNow = fakeNow;
+    fakeNow += 120_000; // 越过目录 TTL，让 open 时真去拉一次（回包里带 usage）
+    try {
+      const p = { useInput: useInputOf({ draft: "  ", draftRev: 1 }) };
+      let x = fresh(p);
+      await btn(x).onClick();
+      x = render(p); // 面板打开 → 触发 open 里的目录兜底 effect
+      await flush(); await flush();
+      x = render(p);
+      assert.equal(statsEl(x), undefined, "没改写就不许显示用量数字（累计在设置页）");
+    } finally { fakeNow = savedNow; }
+  }
   let t = fresh(INPUT);
   await btn(t).onClick();
   await flush(); await flush();
