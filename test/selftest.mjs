@@ -1576,6 +1576,45 @@ assert.equal(catRoute.payload.value.default, null, "取不到默认模型就是 
   for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
 }
 
+// --- 模型被删（用户 2026-10-31 报：删了模型就报错，点「跟随会话模型」也不行）---
+// 目录里已经没有的模型不能再发：select 的 value 匹配不到 option 时界面看着停在
+// 「跟随会话模型」，点它不触发 change，死模型就一直发出去。两处来源都要退回跟随。
+{
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+  const savedGroups = CATALOG.value.groups;
+  CATALOG.value.groups = [
+    { id: "deepseek-official", name: "DeepSeek", models: [{ id: "deepseek-chat", name: "DeepSeek Chat" }] },
+  ];
+  const lastPost = () => calls.filter((c) => c.method === "POST" && !c.url.endsWith(SETTINGS_PATH)).at(-1);
+
+  // ① 全局设置里存的是已删模型
+  settingsModel = { provider: "deepseek-official", model: "deepseek-reasoner" };
+  const page = await mountClient();
+  await btn(fresh(INPUT, page)).onClick();
+  await flush(); await flush(); await flush();
+  const sel = deepFind(panel(render(INPUT, page)), (k) => k && k.type === "select");
+  assert.equal(sel.props.value, "", "已删模型要退回「跟随会话模型」，下拉框才有选中项");
+  assert.equal(lastPost().body.follow, true, "死模型不许发出去，改发 follow:true");
+  assert.equal("model" in lastPost().body, false);
+  assert.equal(
+    deepFind(panel(render(INPUT, page)), (k) => k && k.props && k.props.className === "po-vars" && String(k.kids[0]).includes("不可用")),
+    undefined, "静默退回，不额外加提示行",
+  );
+
+  // ② 本页记住的是已删模型：同样退回，并把那个死选择从本页清掉
+  sharedStorage.setItem("po.model.default", "deepseek-official/deepseek-reasoner");
+  const page2 = await mountClient();
+  await btn(fresh(INPUT, page2)).onClick();
+  await flush(); await flush(); await flush();
+  assert.equal(lastPost().body.follow, true, "本页记住的死模型也不许发");
+  assert.equal(sharedStorage.getItem("po.model.default"), "follow", "死选择要清掉，否则下次打开又踩一遍");
+
+
+  CATALOG.value.groups = savedGroups;
+  settingsModel = null;
+  for (const k of sharedStorage.keys()) sharedStorage.removeItem(k);
+}
+
 // --- 全局模型设置（宿主）：读写 + 优先级「聊天页 > 全局 > 会话」---
 {
   const settingsFile = join(TMP_DIR, "pref-model.json");
